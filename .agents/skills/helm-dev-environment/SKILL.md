@@ -388,8 +388,11 @@ do not run it against user-owned sandboxes at those names.
 `kubectl get osw` shows a read-only cluster-scoped workspace catalog backed by the
 gateway. Setup binds `openshell-workspace-reader` to the demo user explicitly;
 catalog visibility does not grant access to sandboxes in those namespaces.
+The workspace-reader role includes watch. `kubectl get osw --watch` replays current
+matches, then polls once per second; it has no historical resume or durable
+change journal. Other collection watches remain unsupported.
 Sandbox deletion acknowledges the gateway's durable `Deleting` phase, then kubectl
-waits for removal using a named, UID-aware polling watch. General watches and
+waits for removal using a named, UID-aware polling watch. General sandbox watches and
 Ready-condition waits remain unsupported.
 The test covers published OpenAPI validation and client/server-side apply creation,
 unchanged reapply, ownership conflicts, and persistence across adapter restart.

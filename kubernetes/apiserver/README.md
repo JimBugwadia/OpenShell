@@ -14,7 +14,7 @@ and Secret objects in etcd; sandbox domain records remain in the gateway.
 - `OpenShellSandbox`: create, get, list, delete, update, and patch, including client-side and server-side apply. The gateway sandbox ID, creation time, resource version, labels, and annotations are reflected in Kubernetes metadata. Create accepts `desiredState: Running` (or omits it); authored input round-trips without gateway-expanded template defaults. Status reflects the live gateway phase.
 - `OpenShellSandboxTemplate`: get and list from the gateway `SandboxWorkloadTemplate` resource.
 - `OpenShellProvider`: get and list. Credentials, credential expiration details, and credential handles are never serialized.
-- `OpenShellWorkspace`: cluster-scoped get and list of gateway workspaces, with `status.phase` (`Active`, `Terminating`, or `Unknown`). No create, update, patch, delete, or watch.
+- `OpenShellWorkspace`: cluster-scoped get, list, and polling watch of gateway workspaces, with `status.phase` (`Active`, `Terminating`, or `Unknown`). No create, update, patch, or delete.
 - Unknown workspaces produce an empty list; object operations return a Kubernetes NotFound error that identifies the workspace.
 - `kubectl get openshellsandboxes,openshellproviders,openshellsandboxtemplates -A` lists across gateway workspaces and preserves each object's namespace. It requires cluster-wide Kubernetes list permission and the bridge identity's gateway cross-workspace authorization; namespace-only access does not grant it.
 - Kubernetes authentication and authorization delegate to the core API server when running in-cluster. Install the supplied auth-delegator ClusterRoleBinding and extension-apiserver-authentication-reader RoleBinding.
@@ -27,6 +27,7 @@ Kubectl short names are `oss` (sandboxes), `osst` (sandbox templates), `osp`
 ```shell
 kubectl get osw
 kubectl get osw team-a -o yaml
+kubectl get osw --watch
 kubectl auth can-i create openshellsandboxes.openshell.ai -n team-b
 ```
 
@@ -43,16 +44,29 @@ Listing a workspace does not grant sandbox access or guarantee its Kubernetes
 namespace exists. Check namespace RBAC separately. With the broad demo gateway
 identity, catalog readers can see all workspace names and metadata.
 
-The manifest supplies `openshell-workspace-reader` with only `get` and `list`.
+The manifest supplies `openshell-workspace-reader` with only `get`, `list`, and `watch`.
 Administrators must explicitly bind it at cluster scope; a namespaced RoleBinding
 cannot grant access to this catalog. Demo setup binds it only to `openshell-demo`.
 No workspace access is granted to all authenticated users.
 
+Workspace watch sends current matches as `ADDED`, then polls the gateway every
+second for `ADDED`, `MODIFIED`, and `DELETED` events. Name selection
+(`kubectl get osw team-a --watch`) and label selectors are supported. Each watch
+keeps only its previous snapshot in memory; no database or persistent state is
+added. Gateway errors end the stream with an error event.
+
+This is a best-effort, level-based watch, not a change journal. Changes entirely
+between polls can be missed. Lists return resource version `0`; watches accept
+empty or `0` versions and replay current matches, so `kubectl get --watch` can
+print initial objects again. Nonzero watch versions return 410 and require a
+relist; historical resume, bookmarks, and streaming-list negotiation are not
+implemented. Adapter restarts require a new watch and current-state replay.
+
 ## API limitations
 
-The prototype does not implement general watches, spec mutation, status or log
+Except for workspace polling, the prototype does not implement general watches, spec mutation, status or log
 subresources, server-side dry-run, stable list pagination/snapshot consistency,
-or a gateway change journal. Poll GET to observe readiness; `kubectl get --watch`
+or a gateway change journal. Poll GET to observe sandbox readiness; sandbox `kubectl get --watch`
 and Ready-condition waits are not supported.
 
 `limit`/`continue` use best-effort offset tokens over fresh gateway lists, so
@@ -298,7 +312,7 @@ kubectl --as=openshell-demo get oss worker -n team-b -o yaml
 ```
 
 The apply reports `unchanged`, including after plain create. Repeat GET until
-`status.phase` is `Ready`; general watches and Ready-condition waits remain
+`status.phase` is `Ready`; general sandbox watches and Ready-condition waits remain
 unsupported. Use `kubectl apply` instead of create if `team-b/worker` already exists.
 
 To verify exec through the same gateway, forward it in a separate terminal:

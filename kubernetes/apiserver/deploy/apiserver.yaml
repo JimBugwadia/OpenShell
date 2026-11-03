@@ -160,4 +160,4 @@ metadata:
 rules:
   - apiGroups: ["openshell.ai"]
     resources: ["openshellworkspaces"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]

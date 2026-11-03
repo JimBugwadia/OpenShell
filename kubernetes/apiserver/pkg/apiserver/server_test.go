@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/apiserver/pkg/server/options"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
@@ -220,7 +221,7 @@ func TestAggregatedAPIWithFakeGateway(t *testing.T) {
 	shortNames := map[string]string{"openshellsandboxes": "oss", "openshellsandboxtemplates": "osst", "openshellproviders": "osp", "openshellworkspaces": "osw"}
 	for _, resource := range resources.APIResources {
 		if expected, ok := shortNames[resource.Name]; ok {
-			if resource.Name == "openshellworkspaces" && (resource.Namespaced || strings.Join(resource.Verbs, ",") != "get,list") {
+			if resource.Name == "openshellworkspaces" && (resource.Namespaced || strings.Join(resource.Verbs, ",") != "get,list,watch") {
 				t.Errorf("workspace discovery must be cluster-scoped and read-only: %#v", resource)
 			}
 			if len(resource.ShortNames) != 1 || resource.ShortNames[0] != expected {
@@ -280,8 +281,22 @@ func TestAggregatedAPIWithFakeGateway(t *testing.T) {
 		if err := client.Delete(ctx, "team-a", metav1.DeleteOptions{}); !apierrors.IsMethodNotSupported(err) {
 			t.Fatalf("workspace delete must be unsupported: %v", err)
 		}
-		if _, err := client.List(ctx, metav1.ListOptions{Watch: true}); err == nil {
-			t.Fatal("workspace watch unexpectedly supported")
+		stream, err := client.Watch(ctx, metav1.ListOptions{ResourceVersion: all.GetResourceVersion(), FieldSelector: "metadata.name=team-a"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer stream.Stop()
+		select {
+		case event := <-stream.ResultChan():
+			workspace, ok := event.Object.(*unstructured.Unstructured)
+			if !ok || event.Type != watch.Added || workspace.GetName() != "team-a" {
+				t.Fatalf("workspace watch initial event: %#v", event)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("workspace watch did not stream current state")
+		}
+		if _, err := client.Watch(ctx, metav1.ListOptions{ResourceVersion: "7"}); !apierrors.IsResourceExpired(err) {
+			t.Fatalf("historical workspace watch must require relist: %v", err)
 		}
 		if _, err := fake.GetWorkspace(ctx, "team-a"); err != nil {
 			t.Fatalf("read-only request deleted the workspace: %v", err)

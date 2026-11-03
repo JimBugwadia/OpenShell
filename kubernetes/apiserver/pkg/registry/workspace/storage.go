@@ -44,8 +44,12 @@ func (s *Storage) Get(ctx context.Context, name string, options *metav1.GetOptio
 }
 
 func (s *Storage) List(ctx context.Context, options *metainternalversion.ListOptions) (runtime.Object, error) {
-	if options != nil && (options.ResourceVersion != "" || options.ResourceVersionMatch != "") {
+	if options != nil && ((options.ResourceVersion != "" && options.ResourceVersion != "0") || options.ResourceVersionMatch != "") {
 		return nil, apierrors.NewBadRequest("historical resourceVersion list reads are not supported")
+	}
+	name, err := selectedName(options)
+	if err != nil {
+		return nil, err
 	}
 	items, err := s.gateway.ListWorkspaces(ctx)
 	if err != nil {
@@ -61,12 +65,12 @@ func (s *Storage) List(ctx context.Context, options *metainternalversion.ListOpt
 		if converted == nil || converted.Name == "" {
 			return nil, apierrors.NewServiceUnavailable("gateway returned an invalid workspace")
 		}
-		if selector.Matches(labels.Set(converted.Labels)) {
+		if (name == "" || converted.Name == name) && selector.Matches(labels.Set(converted.Labels)) {
 			convertedItems = append(convertedItems, *converted)
 		}
 	}
 	sort.Slice(convertedItems, func(i, j int) bool { return convertedItems[i].Name < convertedItems[j].Name })
-	page, meta, err := pagination.Page(convertedItems, "", selector.String(), options, convert.OpaqueListResourceVersion())
+	page, meta, err := pagination.Page(convertedItems, "", selector.String()+";name="+name, options, "0")
 	if err != nil {
 		return nil, err
 	}
