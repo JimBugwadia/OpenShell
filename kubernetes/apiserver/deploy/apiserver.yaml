@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: openshell
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openshell-kube-apiserver
+  namespace: openshell
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openshell-kube-apiserver-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: openshell-kube-apiserver
+    namespace: openshell
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openshell-kube-apiserver-authentication-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: openshell-kube-apiserver
+    namespace: openshell
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openshell-kube-apiserver
+  namespace: openshell
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openshell-kube-apiserver
+  template:
+    metadata:
+      labels:
+        app: openshell-kube-apiserver
+    spec:
+      serviceAccountName: openshell-kube-apiserver
+      containers:
+        - name: apiserver
+          image: openshell-kube-apiserver:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --secure-port=8443
+            - --bind-address=0.0.0.0
+            - --tls-cert-file=/var/run/serving/tls.crt
+            - --tls-private-key-file=/var/run/serving/tls.key
+            - --gateway-address=openshell.openshell.svc:8080
+            - --gateway-ca-file=/var/run/gateway/ca.crt
+            - --gateway-client-cert-file=/var/run/gateway/tls.crt
+            - --gateway-client-key-file=/var/run/gateway/tls.key
+          ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: https
+              scheme: HTTPS
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: serving-cert
+              mountPath: /var/run/serving
+              readOnly: true
+            - name: gateway-credentials
+              mountPath: /var/run/gateway
+              readOnly: true
+      volumes:
+        - name: serving-cert
+          secret:
+            secretName: openshell-kube-apiserver-serving-cert
+        - name: gateway-credentials
+          secret:
+            secretName: openshell-client-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openshell-kube-apiserver
+  namespace: openshell
+spec:
+  selector:
+    app: openshell-kube-apiserver
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+      protocol: TCP
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.openshell.ai
+spec:
+  group: openshell.ai
+  version: v1alpha1
+  groupPriorityMinimum: 1000
+  versionPriority: 10
+  service:
+    name: openshell-kube-apiserver
+    namespace: openshell
+    port: 443
+  caBundle: REPLACE_WITH_BASE64_ENCODED_CA
+  insecureSkipTLSVerify: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openshell-sandbox-user
+rules:
+  - apiGroups: ["openshell.ai"]
+    resources: ["openshellsandboxes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["openshell.ai"]
+    resources: ["openshellsandboxtemplates", "openshellproviders"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openshell-workspace-reader
+rules:
+  - apiGroups: ["openshell.ai"]
+    resources: ["openshellworkspaces"]
+    verbs: ["get", "list"]

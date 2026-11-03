@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+["kube-api:demo:up"]
+description = "Prepare two demo workspaces and deploy team-a/worker on kind"
+run = "bash kubernetes/apiserver/hack/kind-demo.sh up"
+
+["kube-api:demo:test"]
+description = "Verify real sandbox creation, exec, and deletion through aggregation"
+run = "bash kubernetes/apiserver/hack/kind-demo.sh test"
+
+["kube-api:demo:down"]
+description = "Delete only the isolated openshell-api-demo kind cluster"
+run = "bash kubernetes/apiserver/hack/kind-demo.sh down"
+
+["kube-api:demo:template"]
+description = "Prepare team-a/team-b templates and deploy only team-a/worker"
+run = "bash kubernetes/apiserver/hack/kind-demo.sh template-demo"

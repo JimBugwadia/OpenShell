@@ -9,6 +9,11 @@ Diagnose a gateway and its selected compute platform. Do not assume OpenShell pr
 
 Use `openshell` first to identify the active endpoint. Then use the platform tools that match the gateway's compute driver: `docker`, `podman`, `kubectl`/`helm`, or VM driver logs.
 
+When comparing CLI results with an aggregated Kubernetes API, first confirm that
+both clients target the same gateway. A Kubernetes namespace does not create a
+gateway workspace; verify both exist with the same name. Catalog visibility alone
+does not grant namespace access, and all-namespace lists do not span gateways.
+
 ## Overview
 
 The target deployment flow is:

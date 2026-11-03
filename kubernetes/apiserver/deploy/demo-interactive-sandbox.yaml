@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: openshell.ai/v1alpha1
+kind: OpenShellSandbox
+metadata:
+  name: worker
+  namespace: team-b
+  labels:
+    app: openshell-template-demo
+spec:
+  workloadTemplate: ubuntu-demo
+  command:
+    - /bin/sh
+    - -c
+    - printf '%s\n' "$DEMO_MESSAGE" > /sandbox/demo-marker; exec sleep infinity
+  restartPolicy: Never
+  desiredState: Running

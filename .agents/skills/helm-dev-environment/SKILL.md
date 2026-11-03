@@ -367,6 +367,39 @@ but will point to a deleted cluster — safe to ignore or clean up manually.
 
 ---
 
+## Experimental aggregated sandbox API demo
+
+The `kubernetes/apiserver/` prototype has a separate kind demo against a real
+published gateway. From a checkout containing that module, use
+`mise run kube-api:demo:up`, `mise run kube-api:demo:test`, and
+`mise run kube-api:demo:down`. Without mise, run
+`bash kubernetes/apiserver/hack/kind-demo.sh up` (or `test` / `down`).
+See the module README for prerequisites, pinned versions, and manual demo steps.
+The `up` command is repeatable: it reuses the named kind cluster, preserves
+sandboxes and valid serving credentials, and reconciles the adapter deployment.
+Setup creates/reuses `team-a` and `team-b` gateway workspaces, matching namespaces
+and scoped demo-user RoleBindings, and an `ubuntu-demo` template in each workspace.
+It deploys and verifies only `team-a/worker`; `team-b` is reserved for interactive
+deployment with `deploy/demo-interactive-sandbox.yaml`. Repeat just this scenario
+with `mise run kube-api:demo:template` (or `kind-demo.sh template-demo`).
+Reruns preserve interactive sandboxes; old `api-demo` resources are not removed.
+The disposable `test` scenario still uses `default/demo` and `default/demo-ssa`;
+do not run it against user-owned sandboxes at those names.
+`kubectl get osw` shows a read-only cluster-scoped workspace catalog backed by the
+gateway. Setup binds `openshell-workspace-reader` to the demo user explicitly;
+catalog visibility does not grant access to sandboxes in those namespaces.
+Sandbox deletion acknowledges the gateway's durable `Deleting` phase, then kubectl
+waits for removal using a named, UID-aware polling watch. General watches and
+Ready-condition waits remain unsupported.
+The test covers published OpenAPI validation and client/server-side apply creation,
+unchanged reapply, ownership conflicts, and persistence across adapter restart.
+Spec mutation is unsupported; metadata-changing apply requires a compatible
+gateway update service and a stopped sandbox, not the pinned 0.1.6 gateway.
+Its kubeconfig and credentials stay under `kubernetes/apiserver/.demo/`; it does
+not reuse the k3d dev cluster or the active CLI gateway.
+
+---
+
 ## Optional Add-ons
 
 Some add-ons can be enabled by uncommenting values in `skaffold.yaml`, but prefer

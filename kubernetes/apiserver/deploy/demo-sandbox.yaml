@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: openshell.ai/v1alpha1
+kind: OpenShellSandbox
+metadata:
+  name: demo
+  namespace: default
+  labels:
+    app: openshell-api-demo
+spec:
+  template:
+    image: nvcr.io/nvidia/base/ubuntu:24.04
+  command:
+    - /bin/sh
+    - -c
+    - echo real-gateway-demo > /sandbox/demo-marker; exec sleep infinity
+  restartPolicy: Never
+  desiredState: Running

@@ -30,6 +30,7 @@ dist
 
 # Kubernetes/local dev
 kubeconfig
+kubernetes/apiserver/.demo
 
 # Caches
 .cache
