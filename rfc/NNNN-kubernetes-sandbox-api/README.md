@@ -116,7 +116,7 @@ implementation plan.
 | `OpenShellSandbox` | Namespaced | `oss` | `Sandbox` | create, get, list, watch, update, patch, delete, deletecollection; `status` (read-only) and `log` subresources |
 | `OpenShellSandboxTemplate` | Namespaced | `osst` | `SandboxWorkloadTemplate` | get, list, watch |
 | `OpenShellProvider` | Namespaced | `osp` | `Provider` | get, list, watch; credentials and credential handles are never returned |
-| `OpenShellWorkspace` | Cluster | `osw` | `Workspace` | get, list only |
+| `OpenShellWorkspace` | Cluster | `osw` | `Workspace` | get, list, watch only |
 
 The `OpenShell` prefix keeps `kubectl`, k9s, and Argo CD from confusing these
 kinds with `agents.x-k8s.io/Sandbox`, as recommended in #1719.
@@ -313,14 +313,14 @@ avoids another stream of etcd writes; it exposes logs and metrics instead.
 ### Kubernetes semantics
 
 These are production requirements, not claims about the prototype. Watch applies
-to the three namespaced resources; the workspace catalog remains get/list only.
+to the three namespaced resources and the cluster-scoped workspace catalog.
 
 | Operation | v1alpha1 behavior |
 | --- | --- |
 | Discovery, OpenAPI, table output | Schemas and discovery served locally; table formatting needs no additional gateway call |
 | CREATE | Gateway object and Kubernetes projection admitted atomically |
 | GET, LIST | Consistent snapshot; full label selector syntax including set-based selectors; field selectors on `metadata.name` and `metadata.namespace`; snapshot-safe continuation |
-| WATCH | Per namespace and across all namespaces (`-A`), resumable from a list `resourceVersion`, with tombstones and `410 Gone` on expiry |
+| WATCH | Per namespace and across all namespaces (`-A`), or cluster-scoped for workspaces; resumable from a list `resourceVersion`, with tombstones and `410 Gone` on expiry |
 | UPDATE, PATCH | JSON merge patch, JSON patch, and server-side apply with managed fields; no strategic merge patch |
 | DELETE, DELETECOLLECTION | Durable gateway admission with UID and version preconditions; acknowledge before waiting for original-UID removal |
 | Dry-run | Validation without persistent writes or runtime side effects |
@@ -359,7 +359,8 @@ return alone.
 No new storage service is added. The production design adds three logical record
 types through gateway migrations for SQLite and PostgreSQL; it does not introduce
 an adapter database or etcd domain storage. The read-only workspace catalog uses
-existing workspace records and needs no additional persistence.
+existing workspace records without a separate projection record; production
+resumable workspace watches also require entries in the shared change journal.
 
 | Record | Contents | Retention |
 | --- | --- | --- |
@@ -422,7 +423,7 @@ credentials. Kubernetes RBAC therefore authorizes end users and the gateway
 authorizes the bridge; per-user gateway ACLs are not evaluated. The server
 records the Kubernetes user, request ID, and verb in its audit output.
 
-Workspace catalog access uses a separate cluster-scoped reader role. Namespace
+Workspace catalog get/list/watch access uses a separate cluster-scoped reader role. Namespace
 roles grant sandbox verbs (including get/list/watch for deletion waits) and
 template/provider reads, not catalog access. The catalog is not a gateway
 per-user authorization report and may expose workspace names outside a caller's
@@ -467,8 +468,17 @@ fixtures, not the proposed HA Helm packaging or production credential scope.
    validation without `--validate=false`. New sandboxes save last-applied
    configuration automatically; plain create followed by unchanged apply works.
    Existing annotation-less objects still need a compatible metadata-update RPC
-   for adoption. All-namespace lists and short names are implemented. The only
-   watch is named, UID-aware deletion tracking, not a general change stream.
+   for adoption. All-namespace lists and short names are implemented. Sandbox
+   watch is limited to named, UID-aware deletion tracking. Workspace catalog
+   watch replays current matches and polls once per second for additions,
+   modifications, and deletions, with name and label filtering. It retains only
+   a per-watch in-memory snapshot, adding no persistent state. Lists return
+   resource version `0`; watches accept empty or `0` versions, while nonzero
+   versions return 410 and require relisting. Initial objects can be repeated
+   after a list or reconnect. Gateway errors terminate the stream; transient
+   changes between polls can be missed. This is not historical replay, a
+   consistent list/watch handoff, or a general change stream. The workspace-reader
+   role grants get/list/watch, never workspace mutations.
    All spec edits, dry-run, subresources, and deletecollection remain unsupported.
    Metadata-changing apply requires the separate update service, updates enabled,
    and a stopped sandbox; it does not work on the pinned 0.1.6 gateway.
@@ -518,7 +528,7 @@ Argo CD, Flux, or production HA.
 - **Kubernetes API surface.** Watch, apply, and selectors have subtle
   semantics. Mitigation: reuse upstream libraries, gate on real-client tests,
   and advertise only qualified semantics. The prototype proves managed-field
-  handling with custom storage, but its deletion-only polling watch and bounded
+  handling with custom storage, but its workspace/deletion polling watches and bounded
   annotation projection are not substitutes for a production journal.
 - **Gateway write amplification.** Journaling every representation change adds
   writes and may serialize a hot path. Mitigation: benchmark commit ordering
