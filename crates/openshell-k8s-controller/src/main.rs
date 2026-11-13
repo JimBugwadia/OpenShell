@@ -13,7 +13,7 @@ use kube::{
 use kube_runtime::{Controller, controller::Action, watcher};
 use openshell_k8s_controller::{
     Binding, FINALIZER, Gateway, GatewayError, OpenShellSandbox, Outcome, Persistence,
-    PersistenceError, RemoteSandbox, SandboxStatus, advance, crd,
+    PersistenceError, RemoteSandbox, SandboxStatus, advance, crd, sync_conditions,
 };
 use openshell_sdk::{
     AuthConfig, ClientConfig, ClientIdentity, OpenShellClient,
@@ -187,13 +187,18 @@ struct Context {
 struct KubePersistence {
     api: Api<OpenShellSandbox>,
     object: Mutex<OpenShellSandbox>,
+    /// Reconcile time used for condition transitions.
+    now: i64,
 }
 
 #[async_trait]
 impl Persistence for KubePersistence {
     async fn save(&self, status: &SandboxStatus) -> Result<(), PersistenceError> {
+        // Derive conditions on every write so they never lag phase and reason.
+        let mut status = status.clone();
+        sync_conditions(&mut status, self.now);
         let mut current = self.object.lock().await;
-        if current.status.as_ref() == Some(status) {
+        if current.status.as_ref() == Some(&status) {
             return Ok(());
         }
         *current = self
@@ -263,10 +268,11 @@ async fn reconcile(object: Arc<OpenShellSandbox>, context: Arc<Context>) -> Resu
     let store = KubePersistence {
         api: context.api.clone(),
         object: Mutex::new((*object).clone()),
+        now,
     };
     let mut expected = binding;
-    expected.create_started_at = status.binding.create_started_at;
-    if status.binding != expected {
+    expected.create_started_at = status.journal.binding.create_started_at;
+    if status.journal.binding != expected {
         status.phase = "Blocked".into();
         status.reason = "BindingChanged".into();
         store.save(&status).await?;
@@ -390,8 +396,8 @@ mod tests {
             let object = self.object.lock().unwrap();
             assert!(object.finalizers().iter().any(|f| f == FINALIZER));
             let status = object.status.as_ref().unwrap();
-            assert!(status.create_attempts > 0);
-            assert_eq!(status.binding, *binding);
+            assert!(status.journal.create_attempts > 0);
+            assert_eq!(status.journal.binding, *binding);
             self.calls.lock().unwrap().push("create");
             Ok(RemoteSandbox {
                 id: "receipt".into(),
@@ -563,11 +569,13 @@ mod tests {
             1,
         )
         .unwrap();
-        let status = SandboxStatus::new(binding, 1);
+        let mut status = SandboxStatus::new(binding, 1);
+        sync_conditions(&mut status, 1);
         object.lock().unwrap().status = Some(status.clone());
         let store = KubePersistence {
             api: context.api.clone(),
             object: Mutex::new(object.lock().unwrap().clone()),
+            now: 2,
         };
         store.save(&status).await.unwrap();
         assert!(calls.lock().unwrap().is_empty());

@@ -132,20 +132,20 @@ EOF
 resource_created=1
 
 kctl wait \
-  --for=jsonpath='{.status.phase}'=Ready \
+  --for=condition=Ready \
   --timeout="${OPENSHELL_CONTROLLER_TIMEOUT:-300}s" \
   "openshellsandbox/${resource_name}" \
   --namespace "${OPENSHELL_CONTROLLER_NAMESPACE}"
 
 status="$(kctl get "openshellsandbox/${resource_name}" \
   --namespace "${OPENSHELL_CONTROLLER_NAMESPACE}" \
-  -o 'jsonpath=phase={.status.phase} gatewayPhase={.status.gatewayPhase} sandboxName={.status.binding.sandboxName} sandboxId={.status.sandboxId}')"
+  -o 'jsonpath=phase={.status.phase} gatewayPhase={.status.gatewayPhase} sandboxName={.status.sandboxName} sandboxId={.status.sandboxId}')"
 printf '%s\n' "${status}"
 
 if [ -n "${OPENSHELL_CONTROLLER_CLI:-}" ]; then
   sandbox_name="$(kctl get "openshellsandbox/${resource_name}" \
     --namespace "${OPENSHELL_CONTROLLER_NAMESPACE}" \
-    -o 'jsonpath={.status.binding.sandboxName}')"
+    -o 'jsonpath={.status.sandboxName}')"
   "${OPENSHELL_CONTROLLER_CLI}" sandbox exec "${sandbox_name}" \
     --gateway-endpoint "${OPENSHELL_CONTROLLER_GATEWAY}" \
     --workspace "${OPENSHELL_CONTROLLER_WORKSPACE}" \

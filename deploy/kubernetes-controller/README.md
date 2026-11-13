@@ -85,16 +85,27 @@ kubectl --context "$KUBE_CONTEXT" apply \
   -f deploy/kubernetes-controller/example-openshell-sandbox.yaml
 kubectl --context "$KUBE_CONTEXT" get openshellsandboxes \
   --namespace "$CONTROLLER_NAMESPACE" --watch
+kubectl --context "$KUBE_CONTEXT" wait --for=condition=Ready \
+  --namespace "$CONTROLLER_NAMESPACE" \
+  openshellsandbox/support-agent-demo
 ```
+
+You can use the short name `ossb` in place of `openshellsandboxes`. The list
+shows the Phase, Reason, Gateway Phase, and Age columns. The top-level status
+fields `phase`, `reason`, `conditions`, `sandboxName`, `sandboxId`, and
+`gatewayPhase` are for you. `status.journal` holds the controller's recovery
+journal, including request IDs, attempt counters, and RFC 3339 retry
+timestamps; don't edit it.
 
 The spec is immutable; create a new resource to request a different template.
 The controller creates a gateway sandbox from the named, existing workspace
 template, which supplies the workload image and environment. The CR intentionally
 has no command or restart-policy overrides; gateway/template defaults apply.
-A `Ready` status means the gateway reports phase `Ready`; it is not an
-application-level health or readiness check. Status is persisted and has no
-freshness timestamp, so a recorded `Ready` value is not proof that the
-controller is currently healthy or observing the gateway.
+A `Ready` condition with status `True` means the gateway reports phase
+`Ready`; it is not an application-level health or readiness check. The
+condition's `lastTransitionTime` records only when its status last changed, so
+a recorded `Ready` value is not proof that the controller is currently healthy
+or observing the gateway.
 
 Delete the resource to request gateway deletion and let the finalizer complete:
 
@@ -176,7 +187,7 @@ export OPENSHELL_CONTROLLER_CLI=target/debug/openshell
 tasks/scripts/test-k8s-controller-gateway-smoke.sh
 ```
 
-The script creates a uniquely named CR, waits for gateway phase `Ready`, runs
+The script creates a uniquely named CR, waits for its `Ready` condition, runs
 `sh -c 'printf "controller-workload-ok\n"'` when
 `OPENSHELL_CONTROLLER_CLI` is set, then deletes the CR and waits for finalizer
 completion. It leaves the finalizer in place and prints a warning if cleanup
@@ -198,6 +209,6 @@ phase `Ready`, executed a Python command through `openshell sandbox exec`, and
 completed gateway deletion through the CR finalizer. This verifies the current
 SDK/controller wire contract against the `0.1.6` gateway image; it is not a
 same-checkout gateway image build or a claim that every gateway version is
-compatible. The CRD apply emitted a non-fatal Kubernetes warning that the
-generated schema's `uint32` format is unrecognized; CRD establishment and
-admission checks succeeded.
+compatible. That smoke predates the `Ready` condition and the
+`status.journal` layout. The generated CRD no longer uses the unrecognized
+`uint32` format, and the kind validation applies it without warnings.
