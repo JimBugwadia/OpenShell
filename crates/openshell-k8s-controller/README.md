@@ -53,15 +53,27 @@ while operations are outstanding is unsupported.
   Create/delete request UUIDs are deterministic and independent of generation.
 - The controller persists each attempt before making its bounded, 30-second RPC.
   It recovers ambiguous results by replaying the same request, including after
-  controller restart and deletion during submission. Replay stops after ten
-  attempts or 23 hours, before the gateway's 24-hour success replay window.
-  Exhaustion retains the finalizer and requires operator investigation.
+  controller restart and deletion during submission. Retries back off
+  exponentially from 30 seconds to a one-hour cap, so ten attempts span about
+  three hours. Replay stops after ten attempts or 23 hours, before the
+  gateway's 24-hour success replay window. Exhaustion retains the finalizer and
+  requires operator investigation.
+- Validation, missing-template, and authorization refusals (`InvalidArgument`,
+  `NotFound`, `FailedPrecondition`, `PermissionDenied`, `Unauthenticated`)
+  block the resource with reason `CreateRejected` and are not retried.
+- Status records `createMayExist` before each create submission. Deleting a
+  resource whose every create attempt was rejected or collided completes
+  without a gateway call. After any uncertain attempt, deletion first recovers
+  the receipt by replay, and a later refusal is treated as uncertain.
 - Successful create receipts, not lookup results or labels, establish the
   recorded gateway sandbox ID. Collisions and ID mismatches fail closed.
 - Accepted sandboxes are never recreated, started, or updated. Explicit stops,
   completion, suspension, and missing records remain observable.
 - Status exposes `phase` (`Ready`, `Progressing`, `Blocked`), a fixed safe `reason`,
-  `observedGeneration`, and the gateway phase. `Ready` means only that the
+  `observedGeneration`, and the gateway phase. `Progressing` includes automatic
+  retries such as `CreateUncertain`, `DeleteUncertain`, and
+  `ObservationUnavailable`; `Blocked` means the controller needs you to act.
+  `Ready` means only that the
   gateway reports Ready; no application health is inferred. Raw gateway errors
   and workload details are not copied into status or logs.
 - Delete admission can precede asynchronous cleanup. The finalizer remains

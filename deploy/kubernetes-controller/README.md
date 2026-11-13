@@ -107,9 +107,13 @@ kubectl --context "$KUBE_CONTEXT" delete openshellsandbox support-agent-demo \
 
 - Run one controller replica for a single namespace/workspace/gateway binding.
   Leader election and multiple-replica coordination are not implemented.
-- Retries replay the same deterministic request ID for at most 10 attempts and
-  within a 23-hour window. Exhausted retries block the resource; they do not
-  imply successful recovery.
+- Retries replay the same deterministic request ID with exponential backoff
+  (30 seconds, doubling to a one-hour cap) for at most 10 attempts and within a
+  23-hour window. While retrying, the resource reports `Progressing`. Exhausted
+  retries block the resource; they do not imply successful recovery.
+- A gateway refusal, such as a missing workload template, blocks the resource
+  with reason `CreateRejected`. Delete the resource and create a corrected one;
+  deletion completes without manual finalizer removal.
 - The controller never adopts an existing gateway sandbox, recreates a
   missing/stopped sandbox, starts an explicitly stopped sandbox, or overwrites
   explicit gateway lifecycle state. Gateway errors and uncertain outcomes may

@@ -217,10 +217,16 @@ async fn collisions_and_replaced_ids_are_never_adopted_or_deleted() {
     advance(&mut status, false, NOW, &gateway, &store)
         .await
         .unwrap();
-    advance(&mut status, true, NOW + 30, &gateway, &store)
-        .await
-        .unwrap();
     assert_eq!(status.reason, "NameCollision");
+    assert!(!store.durable.lock().unwrap().create_may_exist);
+    // A first-attempt collision proves no record of ours exists, so deletion
+    // completes without adopting or deleting the colliding record.
+    assert_eq!(
+        advance(&mut status, true, NOW + 30, &gateway, &store)
+            .await
+            .unwrap(),
+        Outcome::Finalize
+    );
     assert!(status.sandbox_id.is_none());
     status.sandbox_id = Some("original".into());
     *gateway.current.lock().unwrap() = Some(remote(&status, "Ready"));
@@ -259,6 +265,7 @@ async fn accepted_stopped_or_missing_sandbox_is_not_recreated() {
 async fn expired_ambiguous_create_and_delete_fail_closed() {
     let mut status = initial();
     status.create_attempts = 1;
+    status.create_may_exist = true;
     let store = Store {
         durable: Mutex::new(status.clone()),
         fail: false,
@@ -337,4 +344,152 @@ fn gateway_name_fits_routable_limit_without_truncating_operation_identity() {
         "fd229996-bc63-413e-9dc0-cc5f05abe5bd"
     );
     assert_eq!(status.binding.create_request_id, status.binding.source_uid);
+}
+
+#[tokio::test]
+async fn rejected_create_blocks_without_retry_and_deletes_cleanly() {
+    let mut status = initial();
+    let store = Store {
+        durable: Mutex::new(status.clone()),
+        fail: false,
+    };
+    let gateway = mock(&store);
+    gateway
+        .create_results
+        .lock()
+        .unwrap()
+        .push_back(Err(GatewayError::Rejected));
+    advance(&mut status, false, NOW, &gateway, &store)
+        .await
+        .unwrap();
+    assert_eq!(
+        (status.phase.as_str(), status.reason.as_str()),
+        ("Blocked", "CreateRejected")
+    );
+    assert!(!store.durable.lock().unwrap().create_may_exist);
+    advance(&mut status, false, NOW + 3600, &gateway, &store)
+        .await
+        .unwrap();
+    assert_eq!(gateway.creates.lock().unwrap().len(), 1);
+    assert_eq!(
+        advance(&mut status, true, NOW + 3630, &gateway, &store)
+            .await
+            .unwrap(),
+        Outcome::Finalize
+    );
+}
+
+#[tokio::test]
+async fn rejection_after_uncertain_attempt_keeps_replaying_and_blocks_deletion() {
+    let mut status = initial();
+    let store = Store {
+        durable: Mutex::new(status.clone()),
+        fail: false,
+    };
+    let gateway = mock(&store);
+    gateway
+        .create_results
+        .lock()
+        .unwrap()
+        .extend([Err(GatewayError::Uncertain), Err(GatewayError::Rejected)]);
+    advance(&mut status, false, NOW, &gateway, &store)
+        .await
+        .unwrap();
+    advance(&mut status, false, NOW + 30, &gateway, &store)
+        .await
+        .unwrap();
+    assert_eq!(
+        (status.phase.as_str(), status.reason.as_str()),
+        ("Progressing", "CreateUncertain")
+    );
+    assert!(status.create_may_exist);
+    assert_eq!(
+        advance(&mut status, true, NOW + 60, &gateway, &store)
+            .await
+            .unwrap(),
+        Outcome::Requeue
+    );
+}
+
+#[tokio::test]
+async fn crash_after_durable_intent_never_finalizes_without_receipt() {
+    let mut status = initial();
+    let store = Store {
+        durable: Mutex::new(status.clone()),
+        fail: false,
+    };
+    let gateway = mock(&store);
+    gateway
+        .create_results
+        .lock()
+        .unwrap()
+        .push_back(Err(GatewayError::Uncertain));
+    advance(&mut status, false, NOW, &gateway, &store)
+        .await
+        .unwrap();
+    // The intent record written before the RPC already marks possible creation.
+    let mut journal = store.durable.lock().unwrap().clone();
+    journal.reason = "Submitting".into();
+    assert!(journal.create_may_exist);
+    gateway
+        .create_results
+        .lock()
+        .unwrap()
+        .push_back(Err(GatewayError::Uncertain));
+    assert_eq!(
+        advance(&mut journal, true, NOW + 30, &gateway, &store)
+            .await
+            .unwrap(),
+        Outcome::Requeue
+    );
+}
+
+#[tokio::test]
+async fn uncertain_creates_back_off_exponentially_and_report_progressing() {
+    let mut status = initial();
+    let store = Store {
+        durable: Mutex::new(status.clone()),
+        fail: false,
+    };
+    let gateway = mock(&store);
+    gateway
+        .create_results
+        .lock()
+        .unwrap()
+        .extend(std::iter::repeat_n(Err(GatewayError::Uncertain), 10));
+    // Attempt n waits 30 * 2^(n-1) seconds, capped at one hour.
+    let mut at = NOW;
+    for delay in [30, 60, 120, 240, 480, 960, 1920, 3600, 3600] {
+        advance(&mut status, false, at, &gateway, &store)
+            .await
+            .unwrap();
+        assert_eq!(status.phase, "Progressing");
+        let attempts = gateway.creates.lock().unwrap().len();
+        advance(&mut status, false, at + delay - 1, &gateway, &store)
+            .await
+            .unwrap();
+        assert_eq!(gateway.creates.lock().unwrap().len(), attempts);
+        at += delay;
+    }
+    advance(&mut status, false, at, &gateway, &store)
+        .await
+        .unwrap();
+    assert_eq!(gateway.creates.lock().unwrap().len(), 10);
+    // Ten attempts span over three hours, not five minutes.
+    assert!(at - NOW > 3 * 60 * 60);
+    advance(&mut status, false, at + 3600, &gateway, &store)
+        .await
+        .unwrap();
+    assert_eq!(
+        (status.phase.as_str(), status.reason.as_str()),
+        ("Blocked", "CreateReplayExhausted")
+    );
+}
+
+#[test]
+fn journals_without_create_may_exist_fail_closed() {
+    let mut value = serde_json::to_value(initial()).unwrap();
+    value.as_object_mut().unwrap().remove("createMayExist");
+    let status: SandboxStatus = serde_json::from_value(value).unwrap();
+    assert!(status.create_may_exist);
 }

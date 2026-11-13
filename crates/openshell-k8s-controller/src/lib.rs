@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 pub const FINALIZER: &str = "openshell.ai/gateway-cleanup";
 const REPLAY_SECONDS: i64 = 23 * 60 * 60;
 const MAX_ATTEMPTS: u32 = 10;
+const BASE_BACKOFF_SECONDS: i64 = 30;
+const MAX_BACKOFF_SECONDS: i64 = 60 * 60;
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[kube(
@@ -86,10 +88,19 @@ pub struct SandboxStatus {
     pub phase: String,
     pub reason: String,
     pub create_attempts: u32,
+    /// True once any create may have reached the gateway without a receipt.
+    /// Set before each submission; cleared only by a definitive rejection.
+    /// Defaults to true so journals written before this field fail closed.
+    #[serde(default = "fail_closed")]
+    pub create_may_exist: bool,
     pub delete_attempts: u32,
     pub delete_started_at: Option<i64>,
     pub delete_accepted: bool,
     pub retry_after: Option<i64>,
+}
+
+const fn fail_closed() -> bool {
+    true
 }
 
 impl SandboxStatus {
@@ -102,6 +113,7 @@ impl SandboxStatus {
             phase: "Progressing".into(),
             reason: "PendingSubmission".into(),
             create_attempts: 0,
+            create_may_exist: false,
             delete_attempts: 0,
             delete_started_at: None,
             delete_accepted: false,
@@ -135,6 +147,8 @@ pub struct RemoteSandbox {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GatewayError {
     Collision,
+    /// The gateway definitively refused this request before any side effect.
+    Rejected,
     Uncertain,
 }
 
@@ -165,6 +179,15 @@ fn retry_allowed(start: i64, now: i64, attempts: u32) -> bool {
     now >= start && now - start < REPLAY_SECONDS && attempts < MAX_ATTEMPTS
 }
 
+/// Exponential backoff after the given attempt, so the attempt budget spans
+/// hours of gateway unavailability instead of minutes.
+fn backoff(attempts: u32) -> i64 {
+    let exponent = attempts.saturating_sub(1).min(16);
+    BASE_BACKOFF_SECONDS
+        .saturating_mul(1 << exponent)
+        .min(MAX_BACKOFF_SECONDS)
+}
+
 /// Called only after the finalizer and initial binding have been persisted.
 ///
 /// A lost response is recovered only by replaying the exact original request,
@@ -176,11 +199,12 @@ pub async fn advance(
     gateway: &dyn Gateway,
     persistence: &dyn Persistence,
 ) -> Result<Outcome, PersistenceError> {
-    if deleting && status.create_attempts == 0 {
+    if deleting && status.sandbox_id.is_none() && !status.create_may_exist {
+        // No submission can have created a gateway record.
         return Ok(Outcome::Finalize);
     }
     if status.sandbox_id.is_none() {
-        if status.reason == "NameCollision" {
+        if matches!(status.reason.as_str(), "NameCollision" | "CreateRejected") {
             return Ok(Outcome::Requeue);
         }
         if !retry_allowed(
@@ -198,8 +222,10 @@ pub async fn advance(
         {
             return Ok(Outcome::Requeue);
         }
+        let may_already_exist = status.create_may_exist;
         status.create_attempts += 1;
-        status.retry_after = Some(now.saturating_add(30));
+        status.create_may_exist = true;
+        status.retry_after = Some(now.saturating_add(backoff(status.create_attempts)));
         status.report("Progressing", "Submitting");
         persistence.save(status).await?;
         match gateway.create(&status.binding).await {
@@ -208,11 +234,18 @@ pub async fn advance(
                 status.retry_after = None;
                 status.report("Progressing", "Accepted");
             }
-            Ok(_) | Err(GatewayError::Uncertain) => {
-                status.report("Blocked", "CreateUncertain");
+            // A refusal proves only that this attempt created nothing. After an
+            // uncertain attempt, keep replaying to recover a possible receipt.
+            Err(GatewayError::Rejected) if !may_already_exist => {
+                status.create_may_exist = false;
+                status.report("Blocked", "CreateRejected");
             }
             Err(GatewayError::Collision) => {
+                status.create_may_exist = may_already_exist;
                 status.report("Blocked", "NameCollision");
+            }
+            Ok(_) | Err(GatewayError::Uncertain | GatewayError::Rejected) => {
+                status.report("Progressing", "CreateUncertain");
             }
         }
         persistence.save(status).await?;
@@ -222,7 +255,7 @@ pub async fn advance(
     match gateway.get(&status.binding).await {
         Ok(None) if deleting => return Ok(Outcome::Finalize),
         Ok(None) => status.report("Blocked", "AcceptedSandboxMissing"),
-        Err(_) => status.report("Blocked", "ObservationUnavailable"),
+        Err(_) => status.report("Progressing", "ObservationUnavailable"),
         Ok(Some(remote)) if Some(&remote.id) != status.sandbox_id.as_ref() => {
             status.report("Blocked", "IdentityMismatch");
         }
@@ -239,14 +272,14 @@ pub async fn advance(
                         return Ok(Outcome::Requeue);
                     }
                     status.delete_attempts += 1;
-                    status.retry_after = Some(now.saturating_add(30));
+                    status.retry_after = Some(now.saturating_add(backoff(status.delete_attempts)));
                     status.report("Progressing", "Deleting");
                     persistence.save(status).await?;
                     if gateway.delete(&status.binding).await.is_ok() {
                         status.delete_accepted = true;
                         status.report("Progressing", "WaitingForAbsence");
                     } else {
-                        status.report("Blocked", "DeleteUncertain");
+                        status.report("Progressing", "DeleteUncertain");
                     }
                 } else {
                     status.report("Blocked", "DeleteReplayExhausted");

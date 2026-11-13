@@ -108,6 +108,20 @@ impl Gateway for RpcGateway {
             Err(status) if status.code() == tonic::Code::AlreadyExists => {
                 Err(GatewayError::Collision)
             }
+            // Validation, missing-template, and authorization refusals precede
+            // any gateway side effect.
+            Err(status)
+                if matches!(
+                    status.code(),
+                    tonic::Code::InvalidArgument
+                        | tonic::Code::NotFound
+                        | tonic::Code::FailedPrecondition
+                        | tonic::Code::PermissionDenied
+                        | tonic::Code::Unauthenticated
+                ) =>
+            {
+                Err(GatewayError::Rejected)
+            }
             Err(_) => Err(GatewayError::Uncertain),
         }
     }
