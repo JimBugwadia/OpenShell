@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "openshell-k8s-controller"
+description = "Experimental namespaced Sandbox CRD gateway controller"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+clap = { workspace = true }
+futures = { workspace = true }
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
+kube-runtime = { workspace = true }
+openshell-sdk = { path = "../openshell-sdk" }
+schemars = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yml = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+http = { workspace = true }
+http-body-util = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true

@@ -4853,6 +4853,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "openshell-k8s-controller"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "clap",
+ "futures",
+ "http 1.4.0",
+ "http-body-util",
+ "k8s-openapi",
+ "kube",
+ "kube-runtime",
+ "noyalib",
+ "openshell-sdk",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tower",
+ "uuid",
+]
+
+[[package]]
 name = "openshell-ocsf"
 version = "0.0.0"
 dependencies = [
