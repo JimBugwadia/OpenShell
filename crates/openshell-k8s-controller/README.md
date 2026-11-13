@@ -43,9 +43,10 @@ while operations are outstanding is unsupported.
 
 ## Lifecycle and failure handling
 
-- The finalizer is acknowledged before any gateway submission. Status records
-  the source UID/name/namespace, exact gateway/workspace binding, immutable
-  template, operation IDs, and gateway receipt.
+- The finalizer is acknowledged before any gateway submission. The
+  `status.journal` recovery journal records the source UID, name, and
+  namespace, the exact gateway and workspace binding, the immutable template,
+  operation IDs, attempt counters, and retry timestamps.
 - Gateway names are `os-<first 16 source UUID hex characters>`, fitting the
   gateway's 19-character routable-name limit. The full source UID remains in
   status and operation identity; short-name collisions fail closed rather than
@@ -60,14 +61,67 @@ while operations are outstanding is unsupported.
   recorded gateway sandbox ID. Collisions and ID mismatches fail closed.
 - Accepted sandboxes are never recreated, started, or updated. Explicit stops,
   completion, suspension, and missing records remain observable.
-- Status exposes `phase` (`Ready`, `Progressing`, `Blocked`), a fixed safe `reason`,
-  `observedGeneration`, and the gateway phase. `Ready` means only that the
-  gateway reports Ready; no application health is inferred. Raw gateway errors
-  and workload details are not copied into status or logs.
+- Status exposes `phase` (`Ready`, `Progressing`, `Blocked`), a fixed safe
+  `reason`, a `Ready` condition, `observedGeneration`, `sandboxName`,
+  `sandboxId`, and `gatewayPhase`. `Ready` means only that the gateway reports
+  Ready; no application health is inferred. Raw gateway errors and workload
+  details are not copied into status or logs.
 - Delete admission can precede asynchronous cleanup. The finalizer remains
   until a subsequent authorized gateway lookup reports the record absent.
   Equivalent status is not rewritten; writes use Kubernetes resource-version
   preconditions and preserve other finalizers.
+
+## Status
+
+Top-level fields are for users. `status.journal` is the controller's recovery
+journal; don't edit it. Timestamps use RFC 3339.
+
+```yaml
+status:
+  observedGeneration: 1
+  phase: Ready
+  reason: GatewayReady
+  conditions:
+    - type: Ready
+      status: "True"
+      reason: GatewayReady
+      message: The gateway reports the sandbox phase as Ready.
+      lastTransitionTime: "2026-11-13T18:04:12Z"
+      observedGeneration: 1
+  sandboxName: os-fd229996bc63413e
+  sandboxId: 3b0c6f9e-2f44-4d7a-9a51-6f1f1c2b8e10
+  gatewayPhase: Ready
+  journal:
+    binding:
+      sourceUid: fd229996-bc63-413e-9dc0-cc5f05abe5bd
+      sourceName: support-agent
+      namespace: agents
+      gateway: https://gateway.example:8080
+      workspace: default
+      sandboxName: os-fd229996bc63413e
+      createRequestId: fd229996-bc63-413e-9dc0-cc5f05abe5bd
+      deleteRequestId: fd229996-bc63-413e-9dc0-cc5f05abe5bc
+      createStartedAt: "2026-11-13T18:03:58Z"
+      workloadTemplate: support-agent-v2
+    createAttempts: 1
+    deleteAttempts: 0
+    deleteStartedAt: null
+    deleteAccepted: false
+    retryAfter: null
+```
+
+The controller derives the `Ready` condition from `phase` and `reason` on
+every status write. The condition is `True` when the phase is `Ready`,
+`Unknown` when a create, delete, or observation result is uncertain, and
+`False` otherwise. `lastTransitionTime` changes only when the condition status
+changes. The condition message is fixed text selected by the reason.
+
+`kubectl get openshellsandboxes` (short name `ossb`) shows the Phase, Reason,
+Gateway Phase, and Age columns. To wait for readiness, run:
+
+```shell
+kubectl wait --for=condition=Ready openshellsandbox/support-agent -n agents
+```
 
 ## Safety limits
 
