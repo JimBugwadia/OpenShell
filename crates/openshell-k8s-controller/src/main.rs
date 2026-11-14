@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use clap::Parser;
@@ -59,6 +59,22 @@ fn create_request(binding: &Binding) -> CreateSandboxRequest {
         workload_template: binding.workload_template.clone(),
         request_id: binding.create_request_id.clone(),
         spec: Some(proto::SandboxSpec::default()),
+        // Lets CLI users see which Kubernetes resource owns the sandbox.
+        // Informational only: ownership is never inferred from these values.
+        annotations: HashMap::from([
+            (
+                "kubernetes.openshell.ai/namespace".into(),
+                binding.namespace.clone(),
+            ),
+            (
+                "kubernetes.openshell.ai/name".into(),
+                binding.source_name.clone(),
+            ),
+            (
+                "kubernetes.openshell.ai/uid".into(),
+                binding.source_uid.clone(),
+            ),
+        ]),
         ..Default::default()
     }
 }
@@ -596,6 +612,20 @@ mod tests {
         let request = create_request(&binding);
         assert_eq!(request.spec, Some(proto::SandboxSpec::default()));
         assert_eq!(request.workload_template, "agent-v1");
+        assert_eq!(
+            request
+                .annotations
+                .get("kubernetes.openshell.ai/name")
+                .map(String::as_str),
+            Some("agent")
+        );
+        assert_eq!(
+            request
+                .annotations
+                .get("kubernetes.openshell.ai/namespace")
+                .map(String::as_str),
+            Some("agents")
+        );
         assert_eq!(
             request.workspace_scope,
             Some(proto::workspace_selector("default"))

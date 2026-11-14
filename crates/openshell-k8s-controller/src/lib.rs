@@ -188,7 +188,9 @@ fn ready_message(phase: &str, reason: &str) -> &'static str {
         "CreateUncertain" => "The create result is unknown; the controller replays the request.",
         "CreateReplayExhausted" => "Create replay stopped; investigate the gateway sandbox.",
         "NameCollision" => "A gateway sandbox with this name already exists.",
-        "CreateRejected" => "The gateway rejected the create request; check the workload template.",
+        "CreateRejected" => {
+            "The gateway rejected the create request; check the workload template and that the controller is a sandbox manager."
+        }
         "AcceptedSandboxMissing" => "The gateway no longer reports the accepted sandbox.",
         "ObservationUnavailable" => "The controller cannot observe the gateway sandbox.",
         "IdentityMismatch" => "The gateway sandbox ID differs from the recorded ID.",

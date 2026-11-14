@@ -793,6 +793,14 @@ async fn handle_create_sandbox_inner(
         .map_err(|error| Status::internal(error.to_string()))?;
     if let Some(metadata) = sandbox.metadata.as_mut() {
         runtime_identity.write(&mut metadata.annotations);
+        // Record the creator so per-workspace or mixed managers can be added
+        // later without a data migration.
+        if let Some(manager) = crate::auth::sandbox_managers::manager_id(&principal) {
+            metadata.annotations.insert(
+                crate::auth::sandbox_managers::SANDBOX_MANAGER_ANNOTATION.to_string(),
+                manager,
+            );
+        }
     }
     let launch_authentication = if let Some(authority) = &state.sandbox_session_jwt_authority {
         Some(authority.mint_persisted_launch(&id, &runtime_identity)?)
@@ -7829,6 +7837,40 @@ mod tests {
                 .as_ref()
                 .and_then(|metadata| metadata.annotations.get(&annotation_key)),
             Some(&annotation_value)
+        );
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_records_its_manager() {
+        let state = test_server_state().await;
+
+        let created = handle_create_sandbox(
+            &state,
+            authed_request(CreateSandboxRequest {
+                request_id: String::new(),
+                name: "managed".to_string(),
+                spec: Some(SandboxSpec::default()),
+                labels: HashMap::new(),
+                annotations: HashMap::new(),
+                workspace_scope: Some(openshell_core::proto::workspace_selector(
+                    "default".to_string(),
+                )),
+                await_main_process_attachment: false,
+                workload_template: String::new(),
+                service_exposures: Vec::new(),
+            }),
+        )
+        .await
+        .expect("create")
+        .into_inner()
+        .sandbox
+        .expect("created sandbox");
+
+        assert_eq!(
+            created.metadata.as_ref().and_then(|metadata| metadata
+                .annotations
+                .get(crate::auth::sandbox_managers::SANDBOX_MANAGER_ANNOTATION)),
+            Some(&"oidc:dev-user".to_string())
         );
     }
 

@@ -162,6 +162,10 @@ pub struct GatewayFileSection {
     /// Explicit activation only after the compatible deployment rollout ends.
     #[serde(default)]
     pub enable_sandbox_updates: Option<bool>,
+    /// Identities allowed to provision and change sandboxes; omit or leave
+    /// empty to allow any authorized caller.
+    #[serde(default)]
+    pub sandbox_managers: Option<Vec<String>>,
     #[serde(default)]
     pub grpc_rate_limit_requests: Option<u64>,
     #[serde(default)]
@@ -1527,6 +1531,23 @@ fn parse_and_validate(path: &Path, contents: &str) -> Result<ConfigFile, ConfigF
             message: "must be greater than zero; omit the key to use the built-in default",
         });
     }
+    // A malformed manager entry matches no caller and would block every write.
+    if let Some(managers) = &file.openshell.gateway.sandbox_managers
+        && managers.iter().any(|manager| {
+            !crate::auth::sandbox_managers::MANAGER_ID_PREFIXES
+                .iter()
+                .any(|prefix| {
+                    manager
+                        .strip_prefix(prefix)
+                        .is_some_and(|rest| !rest.is_empty())
+                })
+        })
+    {
+        return Err(ConfigFileError::InvalidValue {
+            field: "openshell.gateway.sandbox_managers",
+            message: "each entry must be <provider>:<subject>, where provider is oidc, mtls, operator, cloudflare_access, or local_dev",
+        });
+    }
     // A zero-sized lock pool would time out every guarded mutation.
     if file.openshell.gateway.database_lock_max_connections == Some(0) {
         return Err(ConfigFileError::InvalidValue {
@@ -2885,6 +2906,40 @@ allow_unauthenticated_users = true
         let file = load(tmp.path()).expect("valid auth config parses");
         let auth = file.openshell.gateway.auth.expect("auth config");
         assert!(auth.allow_unauthenticated_users);
+    }
+
+    #[test]
+    fn parses_sandbox_managers() {
+        let tmp = write_tmp(
+            r#"
+[openshell.gateway]
+sandbox_managers = ["mtls:openshell-k8s-controller", "oidc:ci-bot"]
+"#,
+        );
+        let file = load(tmp.path()).expect("valid sandbox managers parse");
+        assert_eq!(
+            file.openshell.gateway.sandbox_managers.as_deref(),
+            Some(
+                &[
+                    "mtls:openshell-k8s-controller".to_string(),
+                    "oidc:ci-bot".to_string()
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_unqualified_or_empty_sandbox_managers() {
+        for value in [
+            r#"["openshell-k8s-controller"]"#,
+            r#"["mtls:"]"#,
+            r#"["ldap:bot"]"#,
+        ] {
+            let tmp = write_tmp(&format!(
+                "[openshell.gateway]\nsandbox_managers = {value}\n"
+            ));
+            assert!(load(tmp.path()).is_err(), "{value} must be rejected");
+        }
     }
 
     #[test]

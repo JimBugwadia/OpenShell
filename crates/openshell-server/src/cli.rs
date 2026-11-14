@@ -547,6 +547,12 @@ fn prepare_server_config_with_drivers(
     if let Some(auth) = file.as_ref().and_then(|f| f.openshell.gateway.auth.clone()) {
         config.auth = auth;
     }
+    if let Some(managers) = file
+        .as_ref()
+        .and_then(|f| f.openshell.gateway.sandbox_managers.clone())
+    {
+        config.sandbox_managers = managers;
+    }
     config.mtls_auth.enabled = mtls_auth_enabled;
     config.mtls_auth.operator_enabled = args.enable_operator_auth;
 

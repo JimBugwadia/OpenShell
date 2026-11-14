@@ -129,6 +129,8 @@ kubectl --context "$KUBE_CONTEXT" delete openshellsandbox support-agent-demo \
   missing/stopped sandbox, starts an explicitly stopped sandbox, or overwrites
   explicit gateway lifecycle state. Gateway errors and uncertain outcomes may
   leave a resource blocked for operator action.
+- Set the gateway's `sandbox_managers` to the controller's identity so only
+  the controller can change sandboxes. Without it, any authorized caller can.
 - The gateway's `DeleteSandbox` API has no ID/version precondition. The
   controller checks the recorded sandbox ID immediately before deletion, but
   cannot close the race with a concurrent external replacement. Reserve the

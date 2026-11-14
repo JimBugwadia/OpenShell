@@ -282,6 +282,10 @@ log_level             = "info"
 # Activate only after retiring incompatible gateways and outstanding driver work.
 enable_sandbox_updates = false
 
+# Identities allowed to provision and change sandboxes. Omit or leave empty to
+# allow any authorized caller.
+# sandbox_managers = ["mtls:openshell-k8s-controller"]
+
 # Connection ceiling for the gateway's database pool. Omit to use the backend
 # default: 10 for Postgres, 5 for on-disk SQLite.
 database_max_connections = 10
@@ -648,6 +652,34 @@ This is not an automatic mixed-version migration switch. Do not downgrade while
 an image update is pending or retained sandboxes require the private image
 revision protocol. SQLite supports one gateway process only; activation attests
 that the previous process has stopped, not that sharing a SQLite file enables HA.
+
+## Sandbox Managers
+
+`[openshell.gateway] sandbox_managers` lists the identities allowed to
+provision and change the gateway's sandboxes. When you omit it or leave it
+empty, any authorized caller can, which is the default behavior. This setting
+is experimental and supports the Kubernetes controller prototype.
+
+```toml
+[openshell.gateway]
+sandbox_managers = ["mtls:openshell-k8s-controller"]
+```
+
+Write each entry as `<provider>:<subject>`. The subject is the client
+certificate CN for `mtls` and `operator`, and the token's `sub` claim for
+`oidc` and `cloudflare_access`. The gateway rejects entries without one of
+these prefixes when it loads the file.
+
+When the list isn't empty, only the listed identities can create, delete,
+stop, start, suspend, resume, or update sandboxes, attach or detach providers,
+expose services, approve or edit policy drafts, or change a sandbox's
+configuration. Other callers can still list and inspect sandboxes, read logs,
+and exec. Operators, and callers with the configured OIDC admin role, can still
+stop and delete sandboxes in an emergency. Sandbox supervisors are unaffected.
+
+The gateway records the creating identity on each new sandbox in the
+`internal.openshell.ai/sandbox-manager` annotation. Change the list only
+while the gateway has no sandboxes; the gateway doesn't check this yet.
 
 ## Database Pool
 
