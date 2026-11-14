@@ -40,7 +40,7 @@ pub(super) async fn handle_expose_service(
 ) -> Result<Response<ServiceEndpointResponse>, Status> {
     let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
-    let sandbox = super::sandbox::resolve_and_authorize_sandbox_name(
+    let sandbox = super::sandbox::resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &req.sandbox,
@@ -355,7 +355,7 @@ pub(super) async fn handle_delete_service(
         .get::<Arc<DeleteServiceProbe>>()
         .cloned();
     let req = request.into_inner();
-    let sandbox = super::sandbox::resolve_and_authorize_sandbox_name(
+    let sandbox = super::sandbox::resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &req.sandbox,

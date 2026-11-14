@@ -9,11 +9,19 @@
 //! Everyone else keeps read and debug access, and operators or holders of the
 //! configured admin role keep an emergency stop and delete.
 
+use openshell_core::proto::Sandbox;
+use prost::Message;
+
 use crate::auth::identity::{Identity, IdentityProvider};
 use crate::auth::principal::Principal;
+use crate::persistence::{ObjectCursor, ObjectType, Store};
 
 /// Annotation that records which identity created a sandbox.
 pub const SANDBOX_MANAGER_ANNOTATION: &str = "internal.openshell.ai/sandbox-manager";
+
+/// Annotation that records the managers list in effect when a sandbox was
+/// created, so the gateway can tell when the list changed under it.
+pub const SANDBOX_MANAGERS_CONFIG_ANNOTATION: &str = "internal.openshell.ai/sandbox-managers";
 
 /// Sandbox-changing methods restricted to managers.
 ///
@@ -49,6 +57,63 @@ const EMERGENCY_METHODS: &[&str] = &[
 /// Error message for callers that aren't sandbox managers.
 pub const NOT_A_MANAGER: &str =
     "this gateway's sandboxes are managed by another identity; use it to make this change";
+
+/// Error message for a manager changing another manager's sandbox.
+pub const NOT_THE_RECORDED_MANAGER: &str =
+    "this sandbox is managed by another identity; use it to make this change";
+
+const SCAN_PAGE_SIZE: u32 = 1000;
+
+/// Canonical, order-independent form of a managers list, recorded on each
+/// sandbox. An empty list, the default, is `[]`.
+#[must_use]
+pub fn canonical(managers: &[String]) -> String {
+    let mut sorted = managers.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    serde_json::to_string(&sorted).unwrap_or_default()
+}
+
+/// Refuse to start when any existing sandbox was created under a different
+/// managers list. Sandboxes created before the list was recorded count as
+/// created under the default, empty list.
+///
+/// # Errors
+///
+/// Returns a description of the change when it isn't safe, or of the store
+/// failure that prevented the check.
+pub async fn verify_unchanged(store: &Store, managers: &[String]) -> Result<(), String> {
+    let current = canonical(managers);
+    let mut cursor = None;
+    loop {
+        let records = store
+            .list_by_type_after(Sandbox::object_type(), cursor.as_ref(), SCAN_PAGE_SIZE)
+            .await
+            .map_err(|error| format!("could not check sandbox managers: {error}"))?;
+        cursor = records.last().map(ObjectCursor::from);
+        for record in &records {
+            let Ok(sandbox) = Sandbox::decode(record.payload.as_slice()) else {
+                continue;
+            };
+            let recorded = sandbox
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.annotations.get(SANDBOX_MANAGERS_CONFIG_ANNOTATION))
+                .map_or("[]", String::as_str);
+            if recorded != current {
+                return Err(format!(
+                    "openshell.gateway.sandbox_managers changed from {recorded} to {current} \
+                     while sandboxes exist (for example {}/{}); restore the previous list, \
+                     or delete the gateway's sandboxes before changing it",
+                    record.workspace, record.name
+                ));
+            }
+        }
+        if records.len() < SCAN_PAGE_SIZE as usize {
+            return Ok(());
+        }
+    }
+}
 
 /// Provider-qualified, stable name for a caller, as written in the gateway
 /// configuration: `oidc:<sub>`, `mtls:<certificate CN>`,
@@ -128,6 +193,27 @@ impl SandboxManagers {
             return true;
         }
         EMERGENCY_METHODS.contains(&path) && self.has_emergency_access(principal)
+    }
+
+    /// Whether `principal` may change one sandbox, given the manager recorded
+    /// on it. Only that manager may, apart from emergency stop and delete.
+    /// A sandbox with no recorded manager can't exist under an enforced list,
+    /// because the gateway refuses to start after the list changes.
+    #[must_use]
+    pub fn permits_sandbox(
+        &self,
+        principal: &Principal,
+        recorded_manager: Option<&str>,
+        emergency: bool,
+    ) -> bool {
+        if !self.is_enforced() || !matches!(principal, Principal::User(_) | Principal::Operator(_))
+        {
+            return true;
+        }
+        if emergency && self.has_emergency_access(principal) {
+            return true;
+        }
+        manager_id(principal).is_some_and(|id| recorded_manager == Some(id.as_str()))
     }
 
     fn has_emergency_access(&self, principal: &Principal) -> bool {
@@ -233,6 +319,71 @@ mod tests {
         assert!(!managers.permits(&admin, START));
         assert!(managers.permits(&operator("oncall"), DELETE));
         assert!(!managers.permits(&operator("oncall"), CREATE));
+    }
+
+    #[test]
+    fn only_the_recorded_manager_changes_a_sandbox() {
+        let managers = SandboxManagers::new(
+            vec!["mtls:cluster-a".into(), "mtls:cluster-b".into()],
+            "openshell-admin",
+        );
+        let a = mtls_user("cluster-a", &[]);
+        let b = mtls_user("cluster-b", &[]);
+        assert!(managers.permits_sandbox(&a, Some("mtls:cluster-a"), false));
+        assert!(!managers.permits_sandbox(&b, Some("mtls:cluster-a"), false));
+        assert!(!managers.permits_sandbox(&b, Some("mtls:cluster-a"), true));
+        assert!(!managers.permits_sandbox(&a, None, false));
+        let admin = mtls_user("oncall", &["openshell-admin"]);
+        assert!(managers.permits_sandbox(&admin, Some("mtls:cluster-a"), true));
+        assert!(!managers.permits_sandbox(&admin, Some("mtls:cluster-a"), false));
+    }
+
+    #[test]
+    fn recorded_manager_is_ignored_without_a_list() {
+        let managers = SandboxManagers::new(vec![], "");
+        assert!(managers.permits_sandbox(&user("alice"), Some("oidc:bob"), false));
+        assert!(managed().permits_sandbox(&sandbox("sandbox-1"), None, false));
+    }
+
+    #[test]
+    fn canonical_list_ignores_order_and_duplicates() {
+        let a = canonical(&["mtls:b".into(), "mtls:a".into(), "mtls:a".into()]);
+        assert_eq!(a, canonical(&["mtls:a".into(), "mtls:b".into()]));
+        assert_eq!(a, r#"["mtls:a","mtls:b"]"#);
+        assert_eq!(canonical(&[]), "[]");
+    }
+
+    #[tokio::test]
+    async fn startup_refuses_a_changed_list_while_sandboxes_exist() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        // An empty gateway accepts any list.
+        verify_unchanged(&store, &["mtls:k8s".into()])
+            .await
+            .unwrap();
+
+        let sandbox = Sandbox {
+            metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                id: "sb-1".into(),
+                name: "agent".into(),
+                workspace: "default".into(),
+                annotations: [(
+                    SANDBOX_MANAGERS_CONFIG_ANNOTATION.to_string(),
+                    canonical(&["mtls:k8s".into()]),
+                )]
+                .into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        store.put_message(&sandbox).await.unwrap();
+
+        verify_unchanged(&store, &["mtls:k8s".into()])
+            .await
+            .unwrap();
+        for changed in [vec![], vec!["mtls:other".to_string()]] {
+            let error = verify_unchanged(&store, &changed).await.unwrap_err();
+            assert!(error.contains("default/agent"), "{error}");
+        }
     }
 
     #[test]

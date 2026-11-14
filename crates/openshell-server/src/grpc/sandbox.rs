@@ -194,6 +194,66 @@ pub(super) async fn fetch_and_authorize_sandbox(
 /// Resolve a public sandbox name and authorize its persisted workspace.
 /// Missing and unauthorized objects deliberately share one response so names
 /// cannot be used as an existence oracle.
+/// Rejects a change to `sandbox` from anyone but the manager recorded on it,
+/// when the gateway has sandbox managers. `emergency` allows operators and
+/// admins to stop or delete it.
+pub(super) fn require_recorded_manager(
+    state: &ServerState,
+    principal: &crate::auth::principal::Principal,
+    sandbox: &Sandbox,
+    emergency: bool,
+) -> Result<(), Status> {
+    use crate::auth::sandbox_managers::{
+        NOT_THE_RECORDED_MANAGER, SANDBOX_MANAGER_ANNOTATION, SandboxManagers,
+    };
+    let managers = SandboxManagers::new(
+        state.config.sandbox_managers.clone(),
+        state.admin_role.clone(),
+    );
+    let recorded = sandbox
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.annotations.get(SANDBOX_MANAGER_ANNOTATION))
+        .map(String::as_str);
+    if managers.permits_sandbox(principal, recorded, emergency) {
+        Ok(())
+    } else {
+        Err(Status::permission_denied(NOT_THE_RECORDED_MANAGER))
+    }
+}
+
+/// [`resolve_and_authorize_sandbox_name`] for a change only the sandbox's
+/// recorded manager may make.
+pub(super) async fn resolve_and_authorize_sandbox_change(
+    state: &ServerState,
+    principal: &crate::auth::principal::Principal,
+    sandbox_name: &str,
+    workspace: &str,
+    min_role: MinWorkspaceRole,
+) -> Result<Sandbox, Status> {
+    let sandbox =
+        resolve_and_authorize_sandbox_name(state, principal, sandbox_name, workspace, min_role)
+            .await?;
+    require_recorded_manager(state, principal, &sandbox, false)?;
+    Ok(sandbox)
+}
+
+/// [`resolve_and_authorize_sandbox_change`] for an emergency stop, which
+/// operators and admins may also make.
+pub(super) async fn resolve_and_authorize_sandbox_stop(
+    state: &ServerState,
+    principal: &crate::auth::principal::Principal,
+    sandbox_name: &str,
+    workspace: &str,
+    min_role: MinWorkspaceRole,
+) -> Result<Sandbox, Status> {
+    let sandbox =
+        resolve_and_authorize_sandbox_name(state, principal, sandbox_name, workspace, min_role)
+            .await?;
+    require_recorded_manager(state, principal, &sandbox, true)?;
+    Ok(sandbox)
+}
+
 pub(super) async fn resolve_and_authorize_sandbox_name(
     state: &ServerState,
     principal: &crate::auth::principal::Principal,
@@ -324,7 +384,7 @@ pub(super) async fn handle_update_sandbox(
     let principal = super::extract_principal(&request)?;
     let request = request.into_inner();
     validate_image_update_request(&request)?;
-    let sandbox = resolve_and_authorize_sandbox_name(
+    let sandbox = resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &request.name,
@@ -801,6 +861,11 @@ async fn handle_create_sandbox_inner(
                 manager,
             );
         }
+        // Lets the gateway refuse to start if the list later changes.
+        metadata.annotations.insert(
+            crate::auth::sandbox_managers::SANDBOX_MANAGERS_CONFIG_ANNOTATION.to_string(),
+            crate::auth::sandbox_managers::canonical(&state.config.sandbox_managers),
+        );
     }
     let launch_authentication = if let Some(authority) = &state.sandbox_session_jwt_authority {
         Some(authority.mint_persisted_launch(&id, &runtime_identity)?)
@@ -1468,7 +1533,7 @@ pub(super) async fn handle_attach_sandbox_provider(
         .get::<Arc<tokio::sync::Notify>>()
         .cloned();
     let request = request.into_inner();
-    let sandbox = resolve_and_authorize_sandbox_name(
+    let sandbox = resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &request.sandbox,
@@ -1661,7 +1726,7 @@ pub(super) async fn handle_detach_sandbox_provider(
 ) -> Result<Response<DetachSandboxProviderResponse>, Status> {
     let principal = super::extract_principal(&request)?;
     let request = request.into_inner();
-    let sandbox = resolve_and_authorize_sandbox_name(
+    let sandbox = resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &request.sandbox,
@@ -1828,6 +1893,16 @@ async fn handle_delete_sandbox_inner(
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &authz.workspace)
         .await?
         .name;
+    // Only the recorded manager, or an operator or admin in an emergency, may
+    // delete. A missing sandbox falls through to the usual not-found handling.
+    if let Some(sandbox) = state
+        .store
+        .get_message_by_name::<Sandbox>(&workspace, &name)
+        .await
+        .map_err(|error| Status::internal(format!("fetch sandbox failed: {error}")))?
+    {
+        require_recorded_manager(state, &principal, &sandbox, true)?;
+    }
     // Main's canonical public delete request contains no caller-provided
     // identity/version fields. The compute layer still binds the resolved
     // object ID and lifecycle guards before committing deletion.
@@ -1874,7 +1949,7 @@ async fn handle_stop_sandbox_inner(
 ) -> Result<Response<SandboxResponse>, Status> {
     let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
-    let resolved = resolve_and_authorize_sandbox_name(
+    let resolved = resolve_and_authorize_sandbox_stop(
         state,
         &principal,
         &req.name,
@@ -1915,7 +1990,7 @@ async fn handle_start_sandbox_inner(
 ) -> Result<Response<SandboxResponse>, Status> {
     let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
-    let resolved = resolve_and_authorize_sandbox_name(
+    let resolved = resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &req.name,
@@ -1970,7 +2045,7 @@ async fn handle_suspend_sandbox_inner(
 ) -> Result<Response<SandboxResponse>, Status> {
     let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
-    let resolved = resolve_and_authorize_sandbox_name(
+    let resolved = resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &req.name,
@@ -2011,7 +2086,7 @@ async fn handle_resume_sandbox_inner(
 ) -> Result<Response<SandboxResponse>, Status> {
     let principal = super::extract_principal(&request)?;
     let req = request.into_inner();
-    let resolved = resolve_and_authorize_sandbox_name(
+    let resolved = resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &req.name,
@@ -7872,6 +7947,116 @@ mod tests {
                 .get(crate::auth::sandbox_managers::SANDBOX_MANAGER_ANNOTATION)),
             Some(&"oidc:dev-user".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn only_the_recorded_manager_or_an_admin_deletes_a_sandbox() {
+        use crate::auth::identity::{Identity, IdentityProvider};
+        use crate::auth::principal::{Principal, UserPrincipal};
+
+        fn request<T>(principal: Principal, inner: T) -> Request<T> {
+            let mut request = Request::new(inner);
+            request.extensions_mut().insert(principal);
+            request
+        }
+
+        let mut state = test_server_state().await;
+        {
+            let state = Arc::get_mut(&mut state).expect("unique state");
+            state.config.sandbox_managers = vec!["mtls:cluster-a".into(), "mtls:cluster-b".into()];
+            state.admin_role = "openshell-admin".into();
+        }
+        let as_principal = |cn: &str, roles: &[&str]| {
+            Principal::User(UserPrincipal {
+                identity: Identity {
+                    subject: cn.to_string(),
+                    display_name: None,
+                    roles: roles.iter().map(ToString::to_string).collect(),
+                    scopes: vec![],
+                    provider: IdentityProvider::Mtls,
+                },
+            })
+        };
+        let delete = || DeleteSandboxRequest {
+            name: "managed".to_string(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector(
+                "default".to_string(),
+            )),
+            allow_missing: false,
+            request_id: String::new(),
+        };
+
+        let created = handle_create_sandbox(
+            &state,
+            request(
+                as_principal("cluster-a", &["openshell-admin"]),
+                CreateSandboxRequest {
+                    request_id: String::new(),
+                    name: "managed".to_string(),
+                    spec: Some(SandboxSpec::default()),
+                    labels: HashMap::new(),
+                    annotations: HashMap::new(),
+                    workspace_scope: Some(openshell_core::proto::workspace_selector(
+                        "default".to_string(),
+                    )),
+                    await_main_process_attachment: false,
+                    workload_template: String::new(),
+                    service_exposures: Vec::new(),
+                },
+            ),
+        )
+        .await
+        .expect("create")
+        .into_inner()
+        .sandbox
+        .expect("created sandbox");
+        let annotations = &created.metadata.as_ref().unwrap().annotations;
+        assert_eq!(
+            annotations
+                .get(crate::auth::sandbox_managers::SANDBOX_MANAGERS_CONFIG_ANNOTATION)
+                .map(String::as_str),
+            Some(r#"["mtls:cluster-a","mtls:cluster-b"]"#)
+        );
+
+        // Another listed manager, a workspace member without the admin role,
+        // can't delete it.
+        state
+            .store
+            .put_message(&openshell_core::proto::WorkspaceMember {
+                metadata: Some(ObjectMeta {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    name: "cluster-b".to_string(),
+                    workspace: "default".to_string(),
+                    ..Default::default()
+                }),
+                principal_subject: "cluster-b".to_string(),
+                role: openshell_core::proto::WorkspaceRole::Admin.into(),
+            })
+            .await
+            .expect("add member");
+        let err = handle_delete_sandbox(
+            &state,
+            request(as_principal("cluster-b", &["openshell-user"]), delete()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert!(
+            state
+                .store
+                .get_message_by_name::<Sandbox>("default", "managed")
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // An admin can, as an emergency.
+        handle_delete_sandbox(
+            &state,
+            request(as_principal("oncall", &["openshell-admin"]), delete()),
+        )
+        .await
+        .expect("emergency delete");
     }
 
     #[tokio::test]

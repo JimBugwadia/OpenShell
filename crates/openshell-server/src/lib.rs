@@ -847,6 +847,11 @@ pub(crate) async fn run_server(
         return Ok(());
     };
     let store = Arc::new(store);
+    // Changing the managers list would hand existing sandboxes to a different
+    // writer, so it's allowed only while the gateway has none.
+    auth::sandbox_managers::verify_unchanged(&store, &config.sandbox_managers)
+        .await
+        .map_err(Error::config)?;
     let credentials = credentials::CredentialRuntime::from_config_file_with_store(
         &config,
         config_file.as_ref(),

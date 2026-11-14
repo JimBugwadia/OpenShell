@@ -142,7 +142,9 @@ only the controller's identity, for example `mtls:<certificate CN>` or
 caller, so each sandbox has one writer, while the CLI and SDK can still list
 sandboxes, read logs, and exec. See `sandbox_managers` in the gateway
 configuration reference. If the controller isn't a listed manager, creates fail
-with reason `CreateRejected`.
+with reason `CreateRejected`. When several controllers share a gateway, each one can
+change only the sandboxes it created. The gateway refuses to start if you change
+the list while sandboxes exist.
 
 Each gateway sandbox carries `kubernetes.openshell.ai/namespace`, `name`, and
 `uid` annotations that point back to its resource. They are informational; the

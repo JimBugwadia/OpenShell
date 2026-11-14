@@ -4256,7 +4256,7 @@ async fn handle_update_config_inner(
             MinWorkspaceRole::Admin
         };
         Some(
-            super::sandbox::resolve_and_authorize_sandbox_name(
+            super::sandbox::resolve_and_authorize_sandbox_change(
                 state,
                 principal,
                 &req.sandbox,
@@ -6191,7 +6191,7 @@ async fn handle_approve_draft_chunk_inner(
     let principal = super::extract_principal(&request)?;
     let replay_facts = super::mutation_replay::ordinary::Facts::from_request(&request);
     let req = request.into_inner();
-    let sandbox = super::sandbox::resolve_and_authorize_sandbox_name(
+    let sandbox = super::sandbox::resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &req.sandbox,
@@ -6339,7 +6339,7 @@ async fn handle_reject_draft_chunk_inner(
     let principal = super::extract_principal(&request)?;
     let replay_facts = super::mutation_replay::ordinary::Facts::from_request(&request);
     let req = request.into_inner();
-    let sandbox = super::sandbox::resolve_and_authorize_sandbox_name(
+    let sandbox = super::sandbox::resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &req.sandbox,
@@ -6445,7 +6445,7 @@ async fn handle_approve_all_draft_chunks_inner(
     let principal = super::extract_principal(&request)?;
     let replay_facts = super::mutation_replay::ordinary::Facts::from_request(&request);
     let req = request.into_inner();
-    let sandbox = super::sandbox::resolve_and_authorize_sandbox_name(
+    let sandbox = super::sandbox::resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &req.sandbox,
@@ -6749,7 +6749,7 @@ pub(super) async fn handle_edit_draft_chunk(
     let principal = super::extract_principal(&request)?;
     let replay_facts = super::mutation_replay::ordinary::Facts::from_request(&request);
     let req = request.into_inner();
-    let sandbox = super::sandbox::resolve_and_authorize_sandbox_name(
+    let sandbox = super::sandbox::resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &req.sandbox,
@@ -6825,7 +6825,7 @@ async fn handle_undo_draft_chunk_inner(
     let principal = super::extract_principal(&request)?;
     let replay_facts = super::mutation_replay::ordinary::Facts::from_request(&request);
     let req = request.into_inner();
-    let sandbox = super::sandbox::resolve_and_authorize_sandbox_name(
+    let sandbox = super::sandbox::resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &req.sandbox,
@@ -6915,7 +6915,7 @@ pub(super) async fn handle_clear_draft_chunks(
     let principal = super::extract_principal(&request)?;
     let replay_facts = super::mutation_replay::ordinary::Facts::from_request(&request);
     let req = request.into_inner();
-    let sandbox = super::sandbox::resolve_and_authorize_sandbox_name(
+    let sandbox = super::sandbox::resolve_and_authorize_sandbox_change(
         state,
         &principal,
         &req.sandbox,
