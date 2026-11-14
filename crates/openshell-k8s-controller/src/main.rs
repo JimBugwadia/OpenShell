@@ -10,10 +10,15 @@ use kube::{
     Api, Client, ResourceExt,
     api::{Patch, PatchParams},
 };
-use kube_runtime::{Controller, controller::Action, watcher};
+use kube_runtime::{
+    Controller,
+    controller::{self, Action},
+    watcher,
+};
 use openshell_k8s_controller::{
     Binding, FINALIZER, Gateway, GatewayError, OpenShellSandbox, Outcome, Persistence,
-    PersistenceError, RemoteSandbox, SandboxStatus, advance, crd, sync_conditions,
+    PersistenceError, RemoteSandbox, SandboxStatus, advance, crd, next_observation,
+    sync_conditions,
 };
 use openshell_sdk::{
     AuthConfig, ClientConfig, ClientIdentity, OpenShellClient,
@@ -46,6 +51,10 @@ struct Args {
     tls_cert: Option<PathBuf>,
     #[arg(long, requires = "tls_cert")]
     tls_key: Option<PathBuf>,
+    /// Reconciles that may run at once. Bounds the burst of gateway calls
+    /// when the controller starts with many existing resources.
+    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u16).range(1..))]
+    max_concurrent_reconciles: u16,
 }
 
 struct RpcGateway {
@@ -324,7 +333,8 @@ async fn reconcile(object: Arc<OpenShellSandbox>, context: Arc<Context>) -> Resu
             .await?;
         return Ok(Action::await_change());
     }
-    Ok(Action::requeue(Duration::from_secs(30)))
+    let delay = next_observation(&status, now, deleting);
+    Ok(Action::requeue(Duration::from_secs(delay.unsigned_abs())))
 }
 
 fn error_policy(_: Arc<OpenShellSandbox>, _: &Error, _: Arc<Context>) -> Action {
@@ -377,6 +387,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         namespace,
     });
     Controller::new(api, watcher::Config::default())
+        .with_config(controller::Config::default().concurrency(args.max_concurrent_reconciles))
         .shutdown_on_signal()
         .run(reconcile, error_policy, context)
         .for_each(|result| async move {

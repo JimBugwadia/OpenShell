@@ -592,3 +592,35 @@ fn journals_without_create_may_exist_fail_closed() {
     let status: SandboxStatus = serde_json::from_value(value).unwrap();
     assert!(status.journal.create_may_exist);
 }
+
+#[test]
+fn settled_sandboxes_are_observed_rarely_and_changing_ones_promptly() {
+    use openshell_k8s_controller::{
+        ACTIVE_OBSERVATION_SECONDS, SETTLED_OBSERVATION_SECONDS, next_observation,
+    };
+    let within = |value: i64, base: i64| value >= base && value <= base + base / 10;
+
+    let mut status = initial();
+    assert!(within(
+        next_observation(&status, NOW, false),
+        ACTIVE_OBSERVATION_SECONDS
+    ));
+    status.phase = "Ready".into();
+    assert!(within(
+        next_observation(&status, NOW, false),
+        SETTLED_OBSERVATION_SECONDS
+    ));
+    // Deletion waits for absence promptly, even for a healthy sandbox.
+    assert!(within(
+        next_observation(&status, NOW, true),
+        ACTIVE_OBSERVATION_SECONDS
+    ));
+    // A pending retry is observed when it becomes due.
+    status.journal.retry_after = Some(NOW + 120);
+    assert!(within(next_observation(&status, NOW, false), 120));
+    // The jitter is stable for one resource.
+    assert_eq!(
+        next_observation(&status, NOW, false),
+        next_observation(&status, NOW, false)
+    );
+}

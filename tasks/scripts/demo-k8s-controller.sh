@@ -6,7 +6,8 @@
 #
 # Creates a throwaway kind cluster for the CRD, plus a dedicated workspace and
 # workload template on an existing gateway, then walks through:
-#   1. Create a sandbox from a custom resource and wait for the Ready condition.
+#   1. Create a sandbox from a custom resource and wait for the Ready condition,
+#      then measure its etcd size and confirm a Ready sandbox causes no writes.
 #   2. Show the same sandbox through the gateway CLI and run a command in it.
 #   3. Reject a spec edit (the spec is immutable).
 #   4. Restart the controller and confirm it doesn't create a duplicate.
@@ -37,6 +38,7 @@ WORKSPACE="crd-demo-${suffix}"
 TEMPLATE="crd-demo-agent"
 KCFG="${ROOT}/target/${CLUSTER}.kubeconfig"
 CONTROLLER_LOG="${ROOT}/target/${CLUSTER}-controller.log"
+WATCH_LOG="${ROOT}/target/${CLUSTER}-watch.log"
 CONTROLLER="${ROOT}/target/debug/openshell-k8s-controller"
 
 bold=$'\033[1m'; green=$'\033[32m'; red=$'\033[31m'; dim=$'\033[2m'; reset=$'\033[0m'
@@ -67,7 +69,7 @@ fi
 [ -e "${KCFG}" ] && fail "refusing to overwrite ${KCFG}"
 mkdir -p "${ROOT}/target"
 
-created_cluster=0 created_workspace=0 created_template=0 controller_pid=
+created_cluster=0 created_workspace=0 created_template=0 controller_pid= watch_pid=
 resources=() sandbox_names=()
 
 stop_controller() {
@@ -100,6 +102,8 @@ cleanup() {
     fi
   done
   stop_controller
+  [ -n "${watch_pid}" ] && kill "${watch_pid}" 2>/dev/null
+  rm -f "${WATCH_LOG}"
   # Fall back to the CLI only for gateway sandboxes this demo created.
   for name in "${sandbox_names[@]+"${sandbox_names[@]}"}"; do
     if os sandbox get "${name}" --workspace "${WORKSPACE}" >/dev/null 2>&1; then
@@ -154,6 +158,11 @@ pass "controller running (pid ${controller_pid}), bound to ${NAMESPACE} -> ${WOR
 # ---------------------------------------------------------------------------
 step "1. Declare a sandbox as a Kubernetes resource"
 resources+=(support-agent)
+# Record every change to the resource, to count the writes it causes.
+kctl get ossb -n "${NAMESPACE}" --watch-only --no-headers \
+  -o 'custom-columns=NAME:.metadata.name,RV:.metadata.resourceVersion' >"${WATCH_LOG}" 2>/dev/null &
+watch_pid=$!
+sleep 1
 cat <<EOF | tee /dev/stderr | kctl apply -f - >/dev/null
 apiVersion: openshell.ai/v1alpha1
 kind: OpenShellSandbox
@@ -171,6 +180,25 @@ sandbox_names+=("${sandbox}")
 echo "Ready condition: $(jp support-agent '{.status.conditions[?(@.type=="Ready")].message}')"
 [ -n "${sandbox_id}" ] || fail "status has no gateway sandbox ID"
 pass "gateway sandbox ${sandbox} (${sandbox_id}) is Ready"
+
+step "Scale check: etcd footprint and write count for one sandbox"
+writes() { grep -c '^support-agent ' "${WATCH_LOG}" || true; }
+writes_to_ready="$(writes)"
+api_bytes="$(kctl get ossb support-agent -n "${NAMESPACE}" -o json | wc -c | tr -d ' ')"
+etcd_bytes="$(kctl -n kube-system exec "etcd-${CLUSTER}-control-plane" -- etcdctl \
+  --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key \
+  get "/registry/openshell.ai/openshellsandboxes/${NAMESPACE}/support-agent" --print-value-only \
+  2>/dev/null | wc -c | tr -d ' ')"
+echo "Stored size in etcd: ${etcd_bytes} bytes (API JSON: ${api_bytes} bytes)"
+echo "Writes from creation to Ready: ${writes_to_ready}"
+steady="${DEMO_STEADY_SECONDS:-45}"
+echo "Watching ${steady}s of steady state..."
+sleep "${steady}"
+steady_writes=$(( $(writes) - writes_to_ready ))
+echo "Writes while Ready: ${steady_writes}"
+[ "${steady_writes}" -eq 0 ] || fail "a Ready sandbox caused ${steady_writes} writes"
+pass "a Ready sandbox adds no etcd writes"
 
 step "2. The same sandbox is visible through the gateway CLI"
 run os sandbox get "${sandbox}" --workspace "${WORKSPACE}" | sed -n '/^ *Id:/,/^ *Workload template:/p'

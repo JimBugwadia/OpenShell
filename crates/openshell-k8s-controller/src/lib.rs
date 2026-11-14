@@ -14,6 +14,35 @@ const REPLAY_SECONDS: i64 = 23 * 60 * 60;
 const MAX_ATTEMPTS: i32 = 10;
 const BASE_BACKOFF_SECONDS: i64 = 30;
 const MAX_BACKOFF_SECONDS: i64 = 60 * 60;
+/// Interval for observing a sandbox that is changing.
+pub const ACTIVE_OBSERVATION_SECONDS: i64 = 30;
+/// Interval for observing a sandbox that is settled, healthy or blocked.
+/// Watch events still trigger an immediate reconcile.
+pub const SETTLED_OBSERVATION_SECONDS: i64 = 5 * 60;
+
+/// Seconds until the controller should observe this sandbox again.
+///
+/// Settled sandboxes are polled rarely so gateway load stays low for large,
+/// stable fleets. A deterministic jitter of up to 10% from the resource UID
+/// spreads the polls of many resources created at the same time.
+#[must_use]
+pub fn next_observation(status: &SandboxStatus, now: i64, deleting: bool) -> i64 {
+    let base = match status.journal.retry_after {
+        Some(retry_after) if retry_after > now => {
+            (retry_after - now).clamp(1, SETTLED_OBSERVATION_SECONDS)
+        }
+        _ if deleting => ACTIVE_OBSERVATION_SECONDS,
+        _ if matches!(status.phase.as_str(), "Ready" | "Blocked") => SETTLED_OBSERVATION_SECONDS,
+        _ => ACTIVE_OBSERVATION_SECONDS,
+    };
+    let seed = status
+        .journal
+        .binding
+        .source_uid
+        .bytes()
+        .fold(0_i64, |acc, byte| (acc * 31 + i64::from(byte)) % 1_000_003);
+    base + seed % (base / 10 + 1)
+}
 
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[kube(
