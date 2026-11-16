@@ -439,7 +439,9 @@ mod tests {
         }
 
         async fn delete(&self, _: &Binding) -> Result<(), GatewayError> {
-            panic!("record is absent; deletion must not be submitted")
+            // The record is absent, so an allow-missing delete succeeds.
+            self.calls.lock().unwrap().push("delete");
+            Ok(())
         }
     }
 
@@ -575,8 +577,26 @@ mod tests {
         }
         calls.lock().unwrap().clear();
         let deleting = object.lock().unwrap().clone();
-        reconcile(Arc::new(deleting), context).await.unwrap();
-        assert_eq!(*calls.lock().unwrap(), vec!["status", "get", "finalizers"]);
+        reconcile(Arc::new(deleting), Arc::clone(&context))
+            .await
+            .unwrap();
+        // A missing record isn't proof of deletion until the gateway accepts one.
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec!["status", "get", "status", "delete", "status"]
+        );
+        assert!(
+            object
+                .lock()
+                .unwrap()
+                .finalizers()
+                .iter()
+                .any(|f| f == FINALIZER)
+        );
+        calls.lock().unwrap().clear();
+        let accepted = object.lock().unwrap().clone();
+        reconcile(Arc::new(accepted), context).await.unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec!["get", "finalizers"]);
         let object = object.lock().unwrap();
         assert_eq!(object.status.as_ref().unwrap().observed_generation, 2);
         assert!(!object.finalizers().iter().any(|f| f == FINALIZER));

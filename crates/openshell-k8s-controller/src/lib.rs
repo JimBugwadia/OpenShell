@@ -482,14 +482,20 @@ pub async fn advance(
         return Ok(Outcome::Requeue);
     }
     match gateway.get(&status.journal.binding).await {
-        Ok(None) if deleting => return Ok(Outcome::Finalize),
-        Ok(None) => status.report("Blocked", "AcceptedSandboxMissing"),
+        // The gateway reports a record the caller can no longer access as not
+        // found, so absence is final only after it accepted this delete.
+        Ok(None) if deleting && status.journal.delete_accepted => return Ok(Outcome::Finalize),
         Err(_) => status.report("Progressing", "ObservationUnavailable"),
         Ok(Some(remote)) if Some(&remote.id) != status.sandbox_id.as_ref() => {
             status.report("Blocked", "IdentityMismatch");
         }
-        Ok(Some(remote)) if deleting => {
-            if status.journal.delete_accepted || remote.phase == "Deleting" {
+        Ok(found) if deleting => {
+            // Otherwise submit the delete; it succeeds for a missing record and
+            // fails for an inaccessible one, so nothing is silently orphaned.
+            let deleting_elsewhere = found
+                .as_ref()
+                .is_some_and(|remote| remote.phase == "Deleting");
+            if status.journal.delete_accepted || deleting_elsewhere {
                 status.report("Progressing", "WaitingForAbsence");
             } else {
                 let start = *status.journal.delete_started_at.get_or_insert(now);
@@ -517,6 +523,7 @@ pub async fn advance(
                 }
             }
         }
+        Ok(None) => status.report("Blocked", "AcceptedSandboxMissing"),
         Ok(Some(remote)) => {
             status.gateway_phase = Some(remote.phase.clone());
             // Stopped, completed, and missing records never trigger Create/Start.

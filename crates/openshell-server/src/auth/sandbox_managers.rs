@@ -92,9 +92,13 @@ pub async fn verify_unchanged(store: &Store, managers: &[String]) -> Result<(), 
             .map_err(|error| format!("could not check sandbox managers: {error}"))?;
         cursor = records.last().map(ObjectCursor::from);
         for record in &records {
-            let Ok(sandbox) = Sandbox::decode(record.payload.as_slice()) else {
-                continue;
-            };
+            // Fail closed: an unreadable record could hide a different list.
+            let sandbox = Sandbox::decode(record.payload.as_slice()).map_err(|error| {
+                format!(
+                    "could not check sandbox managers: sandbox {}/{} is unreadable: {error}",
+                    record.workspace, record.name
+                )
+            })?;
             let recorded = sandbox
                 .metadata
                 .as_ref()

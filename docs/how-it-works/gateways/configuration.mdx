@@ -674,8 +674,14 @@ When the list isn't empty, only the listed identities can create, delete,
 stop, start, suspend, resume, or update sandboxes, attach or detach providers,
 expose services, approve or edit policy drafts, or change a sandbox's
 configuration. Other callers can still list and inspect sandboxes, read logs,
-and exec. Operators, and callers with the configured OIDC admin role, can still
-stop and delete sandboxes in an emergency. Sandbox supervisors are unaffected.
+and exec. Operators, and users with the configured admin role, can still stop
+and delete sandboxes in an emergency; this includes mTLS certificates whose OU
+matches the admin role. Without an admin role, only operators have this access.
+Sandbox supervisors are unaffected.
+
+Workload templates and providers stay writable by workspace admins. A sandbox
+created from a template uses the template's contents at creation time, so
+restrict who can change templates in a workspace that managers use.
 
 The gateway records the creating identity on each new sandbox in the
 `internal.openshell.ai/sandbox-manager` annotation. Only that identity can
@@ -687,6 +693,12 @@ records the list in effect when it was created, and the gateway refuses to
 start if any existing sandbox recorded a different list. Sandboxes created
 before you first set the list count as created under an empty list. To change
 the list, delete the gateway's sandboxes with the previous list in place.
+Changing a manager's certificate CN or token subject is also a change to the
+list.
+
+Give every gateway replica the same list. Each replica checks the list only when
+it starts, so during a rolling update that changes it, new replicas refuse to
+start while old ones keep enforcing the previous list.
 
 ## Database Pool
 

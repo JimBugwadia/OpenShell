@@ -138,6 +138,11 @@ kubectl --context "$KUBE_CONTEXT" delete openshellsandbox support-agent-demo \
   writers with the same gateway permissions to replace those records. The full
   Kubernetes UID remains in status and the request IDs; name-prefix collisions
   fail closed rather than adopting or deleting a record.
+- These states block deletion until you act: `CreateReplayExhausted` or
+  `DeleteReplayExhausted` (retries ran out), `NameCollision` after an uncertain
+  create attempt, and `BindingChanged` (the controller's gateway or workspace
+  flags changed). Check the gateway sandbox named in `status.sandboxName`
+  before you remove the finalizer.
 - The finalizer waits for gateway absence. If it must be removed manually,
   first verify and clean up the corresponding gateway sandbox yourself.
   Removing it while the remote sandbox still exists can orphan that sandbox;

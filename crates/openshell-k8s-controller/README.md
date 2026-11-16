@@ -78,7 +78,10 @@ while operations are outstanding is unsupported.
   automatic retries such as `CreateUncertain`, `DeleteUncertain`, and
   `ObservationUnavailable`; `Blocked` means the controller needs you to act.
 - Delete admission can precede asynchronous cleanup. The finalizer remains
-  until a subsequent authorized gateway lookup reports the record absent.
+  until the gateway has accepted a delete and a later lookup reports the
+  record absent. A lookup that finds nothing isn't enough on its own, because
+  the gateway also reports records the controller can no longer access as not
+  found; the controller submits the delete first, which fails for those.
   Equivalent status is not rewritten; writes use Kubernetes resource-version
   preconditions and preserve other finalizers.
 

@@ -624,3 +624,38 @@ fn settled_sandboxes_are_observed_rarely_and_changing_ones_promptly() {
         next_observation(&status, NOW, false)
     );
 }
+
+#[tokio::test]
+async fn inaccessible_record_during_deletion_is_never_finalized_without_a_delete() {
+    // The gateway reports a record the controller can no longer access as not
+    // found; the delete then fails, so the finalizer stays.
+    let mut status = initial();
+    status.sandbox_id = Some("gateway-id".into());
+    status.journal.create_attempts = 1;
+    let store = Store {
+        durable: Mutex::new(status.clone()),
+        fail: false,
+    };
+    let mut gateway = mock(&store);
+    gateway.delete_error = true;
+    assert_eq!(
+        advance(&mut status, true, NOW, &gateway, &store)
+            .await
+            .unwrap(),
+        Outcome::Requeue
+    );
+    assert_eq!(status.reason, "DeleteUncertain");
+    assert_eq!(gateway.deletes.lock().unwrap().len(), 1);
+    // A truly missing record finalizes once a delete is accepted.
+    gateway.delete_error = false;
+    advance(&mut status, true, NOW + 60, &gateway, &store)
+        .await
+        .unwrap();
+    assert!(status.journal.delete_accepted);
+    assert_eq!(
+        advance(&mut status, true, NOW + 120, &gateway, &store)
+            .await
+            .unwrap(),
+        Outcome::Finalize
+    );
+}

@@ -1895,6 +1895,10 @@ async fn handle_delete_sandbox_inner(
         .name;
     // Only the recorded manager, or an operator or admin in an emergency, may
     // delete. A missing sandbox falls through to the usual not-found handling.
+    // Main's canonical public delete request contains no caller-provided
+    // identity/version fields. The compute layer still binds the resolved
+    // object ID and lifecycle guards before committing deletion.
+    let mut preconditions = SandboxDeletePreconditions::default();
     if let Some(sandbox) = state
         .store
         .get_message_by_name::<Sandbox>(&workspace, &name)
@@ -1902,11 +1906,11 @@ async fn handle_delete_sandbox_inner(
         .map_err(|error| Status::internal(format!("fetch sandbox failed: {error}")))?
     {
         require_recorded_manager(state, &principal, &sandbox, true)?;
+        if !state.config.sandbox_managers.is_empty() {
+            // Delete the sandbox whose manager was checked, never a replacement.
+            preconditions.expected_sandbox_id = Some(sandbox.object_id().to_string());
+        }
     }
-    // Main's canonical public delete request contains no caller-provided
-    // identity/version fields. The compute layer still binds the resolved
-    // object ID and lifecycle guards before committing deletion.
-    let preconditions = SandboxDeletePreconditions::default();
     let result = state
         .compute
         .delete_sandbox_allow_missing_with_preconditions(

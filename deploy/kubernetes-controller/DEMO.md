@@ -1,0 +1,216 @@
+# Demo: declarative OpenShell sandboxes on Kubernetes
+
+This walkthrough shows the experimental `OpenShellSandbox` controller and the
+gateway's sandbox manager setting. It takes about 15 minutes. Part 1 runs the
+controller against an existing local gateway; Part 2 runs a gateway built from
+this checkout to show which identities can change sandboxes.
+
+Each part also has a script that runs the same steps, checks every result, and
+cleans up. Add `DEMO_PAUSE=1` to pause between steps when you present.
+
+```shell
+DEMO_PAUSE=1 tasks/scripts/demo-k8s-controller.sh          # Part 1
+DEMO_PAUSE=1 tasks/scripts/test-sandbox-managers-gateway.sh # Part 2
+```
+
+## Before you start
+
+You need:
+
+- Docker, kind, kubectl, and a Rust toolchain.
+- For Part 1, a running OpenShell gateway registered with the CLI, using mTLS.
+  The commands below assume the gateway named `openshell` at
+  `https://localhost:17670`, with its client certificate in
+  `~/.config/openshell/gateways/openshell/mtls`.
+- For Part 2, port 18291 free and the OpenShell 0.1.6 supervisor and sandbox
+  images available to Docker.
+
+Run the commands from the repository root.
+
+## Part 1: manage a sandbox from Kubernetes
+
+### Step 0: set up
+
+Create a throwaway cluster for the CRD, plus a dedicated gateway workspace and
+workload template. The cluster only stores the declaration; the sandbox runs
+wherever the gateway runs it.
+
+```shell
+export KUBECONFIG=$PWD/target/openshell-crd-demo.kubeconfig
+export WS=crd-demo
+MTLS=~/.config/openshell/gateways/openshell/mtls
+
+kind create cluster --name openshell-crd-demo --kubeconfig "$KUBECONFIG"
+kubectl create namespace agents
+openshell workspace create --name "$WS"
+openshell sandbox template create demo-agent --workspace "$WS"
+
+cargo build -p openshell-k8s-controller
+target/debug/openshell-k8s-controller --print-crd | kubectl apply -f -
+kubectl wait --for=condition=Established crd/openshellsandboxes.openshell.ai
+```
+
+In a second terminal, start the controller. One controller binds one
+namespace to one gateway workspace:
+
+```shell
+export KUBECONFIG=$PWD/target/openshell-crd-demo.kubeconfig
+MTLS=~/.config/openshell/gateways/openshell/mtls
+target/debug/openshell-k8s-controller \
+  --namespace agents --workspace crd-demo --gateway https://localhost:17670 \
+  --tls-ca "$MTLS/ca.crt" --tls-cert "$MTLS/tls.crt" --tls-key "$MTLS/tls.key"
+```
+
+### Step 1: declare a sandbox
+
+```shell
+cat <<EOF | kubectl apply -f -
+apiVersion: openshell.ai/v1alpha1
+kind: OpenShellSandbox
+metadata:
+  name: support-agent
+  namespace: agents
+spec:
+  workloadTemplate: demo-agent
+EOF
+kubectl wait --for=condition=Ready ossb/support-agent -n agents --timeout=300s
+kubectl get ossb -n agents
+```
+
+Expected:
+
+```text
+NAME            PHASE   REASON         GATEWAY PHASE   AGE
+support-agent   Ready   GatewayReady   Ready           30s
+```
+
+Point out: `kubectl wait --for=condition=Ready` works, so Argo CD and Flux can
+assess health without custom scripts.
+
+### Step 2: see the same sandbox through the gateway
+
+```shell
+NAME=$(kubectl get ossb support-agent -n agents -o jsonpath='{.status.sandboxName}')
+openshell sandbox get "$NAME" --workspace "$WS"
+openshell sandbox exec "$NAME" --workspace "$WS" --no-tty -- echo "hello from a CRD-managed sandbox"
+```
+
+Point out: the gateway record carries `kubernetes.openshell.ai/namespace`,
+`name`, and `uid` annotations that point back to the resource.
+
+### Step 3: try to edit the spec
+
+```shell
+kubectl patch ossb support-agent -n agents --type=merge \
+  -p '{"spec":{"workloadTemplate":"something-else"}}'
+```
+
+Expected: `spec is immutable; create a new Sandbox for a different workload`.
+This is a prototype simplification; the first release plans in-place changes
+for policy, providers, and stop or start.
+
+### Step 4: restart the controller
+
+Stop the controller with Ctrl+C and start it again, then:
+
+```shell
+kubectl get ossb support-agent -n agents \
+  -o jsonpath='{.status.sandboxId} attempts={.status.journal.createAttempts}{"\n"}'
+```
+
+Expected: the same sandbox ID and `attempts=1`. The controller resumes from the
+journal in status and replays nothing that already succeeded.
+
+### Step 5: request a template that doesn't exist
+
+```shell
+cat <<EOF | kubectl apply -f -
+apiVersion: openshell.ai/v1alpha1
+kind: OpenShellSandbox
+metadata:
+  name: missing-template
+  namespace: agents
+spec:
+  workloadTemplate: does-not-exist
+EOF
+kubectl wait --for=jsonpath='{.status.reason}'=CreateRejected ossb/missing-template -n agents
+kubectl get ossb -n agents
+kubectl delete ossb missing-template -n agents
+```
+
+Expected: `Blocked` with reason `CreateRejected`, and the delete completes
+without removing the finalizer by hand, because no gateway record can exist.
+
+### Step 6: measure the etcd footprint
+
+```shell
+kubectl -n kube-system exec etcd-openshell-crd-demo-control-plane -- etcdctl \
+  --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key \
+  get /registry/openshell.ai/openshellsandboxes/agents/support-agent --print-value-only | wc -c
+```
+
+Expected: about 2,800 bytes. A Ready sandbox causes no further writes; the
+script checks this by watching the resource for 45 seconds.
+
+### Step 7: delete it
+
+```shell
+kubectl get ossb support-agent -n agents -o jsonpath='{.metadata.finalizers}{"\n"}'
+kubectl delete ossb support-agent -n agents
+openshell sandbox get "$NAME" --workspace "$WS"
+```
+
+Expected: the delete waits for the gateway to remove the sandbox, and the last
+command reports that the sandbox isn't found.
+
+### Clean up
+
+Stop the controller, then:
+
+```shell
+openshell sandbox template delete demo-agent --workspace "$WS"
+openshell workspace delete "$WS"
+kind delete cluster --name openshell-crd-demo --kubeconfig "$KUBECONFIG"
+```
+
+## Part 2: only the manager changes sandboxes
+
+Run this part with the script: it generates its own certificates and gateway
+configuration, which are tedious to set up by hand.
+
+```shell
+DEMO_PAUSE=1 tasks/scripts/test-sandbox-managers-gateway.sh
+```
+
+It starts a gateway from this checkout with:
+
+```toml
+[openshell.gateway]
+sandbox_managers = ["mtls:openshell-k8s-controller"]
+```
+
+and three client certificates: `openshell-k8s-controller` (the manager),
+`openshell-cli` (an ordinary user), and `oncall` with `OU=operator`.
+
+| Step | What happens | Point out |
+| :- | :- | :- |
+| 1 | `openshell-cli` tries `sandbox create` | Rejected: "this gateway's sandboxes are managed by another identity" |
+| 2 | `openshell-k8s-controller` creates `managed-1` | The sandbox records `internal.openshell.ai/sandbox-manager: mtls:openshell-k8s-controller` and the list in effect |
+| 3 | `openshell-cli` lists, then tries `delete` and `stop` | Reading works; changes are rejected |
+| 4 | The gateway restarts with an extra manager in the list | It refuses to start while sandboxes exist, and starts again with the original list |
+| 5 | `oncall` deletes `managed-1` | Operators keep an emergency stop and delete |
+
+The script uses a temporary directory for everything, including the CLI's
+configuration, so it doesn't change your registered gateways.
+
+## Troubleshooting
+
+- **A step fails in a script:** the script prints the controller or gateway log
+  and cleans up what it created.
+- **A resource won't delete:** check `kubectl get ossb -n agents -o
+  jsonpath='{.items[*].status.reason}'`. `CreateReplayExhausted`,
+  `DeleteReplayExhausted`, `NameCollision`, and `BindingChanged` need you to
+  verify the gateway sandbox before you remove the finalizer; see the
+  controller README.
+- **Port 18291 is in use:** set `MANAGERS_TEST_PORT` for Part 2.
