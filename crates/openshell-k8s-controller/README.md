@@ -130,7 +130,7 @@ every status write. The condition is `True` when the phase is `Ready`,
 `False` otherwise. `lastTransitionTime` changes only when the condition status
 changes. The condition message is fixed text selected by the reason.
 
-`kubectl get openshellsandboxes` (short name `ossb`) shows the Phase, Reason,
+`kubectl get openshellsandboxes` (short name `ossbx`) shows the Phase, Reason,
 Gateway Phase, and Age columns. To wait for readiness, run:
 
 ```shell

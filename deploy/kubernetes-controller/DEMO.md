@@ -73,8 +73,8 @@ metadata:
 spec:
   workloadTemplate: demo-agent
 EOF
-kubectl wait --for=condition=Ready ossb/support-agent -n agents --timeout=300s
-kubectl get ossb -n agents
+kubectl wait --for=condition=Ready ossbx/support-agent -n agents --timeout=300s
+kubectl get ossbx -n agents
 ```
 
 Expected:
@@ -90,7 +90,7 @@ assess health without custom scripts.
 ### Step 2: see the same sandbox through the gateway
 
 ```shell
-NAME=$(kubectl get ossb support-agent -n agents -o jsonpath='{.status.sandboxName}')
+NAME=$(kubectl get ossbx support-agent -n agents -o jsonpath='{.status.sandboxName}')
 openshell sandbox get "$NAME" --workspace "$WS"
 openshell sandbox exec "$NAME" --workspace "$WS" --no-tty -- echo "hello from a CRD-managed sandbox"
 ```
@@ -101,7 +101,7 @@ Point out: the gateway record carries `kubernetes.openshell.ai/namespace`,
 ### Step 3: try to edit the spec
 
 ```shell
-kubectl patch ossb support-agent -n agents --type=merge \
+kubectl patch ossbx support-agent -n agents --type=merge \
   -p '{"spec":{"workloadTemplate":"something-else"}}'
 ```
 
@@ -114,7 +114,7 @@ for policy, providers, and stop or start.
 Stop the controller with Ctrl+C and start it again, then:
 
 ```shell
-kubectl get ossb support-agent -n agents \
+kubectl get ossbx support-agent -n agents \
   -o jsonpath='{.status.sandboxId} attempts={.status.journal.createAttempts}{"\n"}'
 ```
 
@@ -133,9 +133,9 @@ metadata:
 spec:
   workloadTemplate: does-not-exist
 EOF
-kubectl wait --for=jsonpath='{.status.reason}'=CreateRejected ossb/missing-template -n agents
-kubectl get ossb -n agents
-kubectl delete ossb missing-template -n agents
+kubectl wait --for=jsonpath='{.status.reason}'=CreateRejected ossbx/missing-template -n agents
+kubectl get ossbx -n agents
+kubectl delete ossbx missing-template -n agents
 ```
 
 Expected: `Blocked` with reason `CreateRejected`, and the delete completes
@@ -156,8 +156,8 @@ script checks this by watching the resource for 45 seconds.
 ### Step 7: delete it
 
 ```shell
-kubectl get ossb support-agent -n agents -o jsonpath='{.metadata.finalizers}{"\n"}'
-kubectl delete ossb support-agent -n agents
+kubectl get ossbx support-agent -n agents -o jsonpath='{.metadata.finalizers}{"\n"}'
+kubectl delete ossbx support-agent -n agents
 openshell sandbox get "$NAME" --workspace "$WS"
 ```
 
@@ -208,7 +208,7 @@ configuration, so it doesn't change your registered gateways.
 
 - **A step fails in a script:** the script prints the controller or gateway log
   and cleans up what it created.
-- **A resource won't delete:** check `kubectl get ossb -n agents -o
+- **A resource won't delete:** check `kubectl get ossbx -n agents -o
   jsonpath='{.items[*].status.reason}'`. `CreateReplayExhausted`,
   `DeleteReplayExhausted`, `NameCollision`, and `BindingChanged` need you to
   verify the gateway sandbox before you remove the finalizer; see the

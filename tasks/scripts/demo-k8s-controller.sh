@@ -159,7 +159,7 @@ pass "controller running (pid ${controller_pid}), bound to ${NAMESPACE} -> ${WOR
 step "1. Declare a sandbox as a Kubernetes resource"
 resources+=(support-agent)
 # Record every change to the resource, to count the writes it causes.
-kctl get ossb -n "${NAMESPACE}" --watch-only --no-headers \
+kctl get ossbx -n "${NAMESPACE}" --watch-only --no-headers \
   -o 'custom-columns=NAME:.metadata.name,RV:.metadata.resourceVersion' >"${WATCH_LOG}" 2>/dev/null &
 watch_pid=$!
 sleep 1
@@ -172,8 +172,8 @@ metadata:
 spec:
   workloadTemplate: ${TEMPLATE}
 EOF
-run kctl wait --for=condition=Ready "--timeout=${TIMEOUT}s" ossb/support-agent -n "${NAMESPACE}"
-run kctl get ossb -n "${NAMESPACE}"
+run kctl wait --for=condition=Ready "--timeout=${TIMEOUT}s" ossbx/support-agent -n "${NAMESPACE}"
+run kctl get ossbx -n "${NAMESPACE}"
 sandbox="$(jp support-agent '{.status.sandboxName}')"
 sandbox_id="$(jp support-agent '{.status.sandboxId}')"
 sandbox_names+=("${sandbox}")
@@ -184,7 +184,7 @@ pass "gateway sandbox ${sandbox} (${sandbox_id}) is Ready"
 step "Scale check: etcd footprint and write count for one sandbox"
 writes() { grep -c '^support-agent ' "${WATCH_LOG}" || true; }
 writes_to_ready="$(writes)"
-api_bytes="$(kctl get ossb support-agent -n "${NAMESPACE}" -o json | wc -c | tr -d ' ')"
+api_bytes="$(kctl get ossbx support-agent -n "${NAMESPACE}" -o json | wc -c | tr -d ' ')"
 etcd_bytes="$(kctl -n kube-system exec "etcd-${CLUSTER}-control-plane" -- etcdctl \
   --endpoints=https://127.0.0.1:2379 --cacert=/etc/kubernetes/pki/etcd/ca.crt \
   --cert=/etc/kubernetes/pki/etcd/server.crt --key=/etc/kubernetes/pki/etcd/server.key \
@@ -209,7 +209,7 @@ grep -q "hello from a CRD-managed sandbox" <<<"${output}" || fail "exec output m
 pass "command ran inside the sandbox"
 
 step "3. The spec is immutable; edits are rejected at admission"
-if kctl patch ossb support-agent -n "${NAMESPACE}" --type=merge \
+if kctl patch ossbx support-agent -n "${NAMESPACE}" --type=merge \
   -p '{"spec":{"workloadTemplate":"something-else"}}' 2>&1; then
   fail "API server accepted a spec change"
 fi
@@ -239,18 +239,18 @@ spec:
   workloadTemplate: does-not-exist
 EOF
 run kctl wait --for=jsonpath='{.status.reason}'=CreateRejected --timeout=120s \
-  ossb/missing-template -n "${NAMESPACE}"
-run kctl get ossb -n "${NAMESPACE}"
+  ossbx/missing-template -n "${NAMESPACE}"
+run kctl get ossbx -n "${NAMESPACE}"
 [ "$(jp missing-template '{.status.conditions[?(@.type=="Ready")].status}')" = "False" ] \
   || fail "rejected resource does not report Ready=False"
 [ "$(jp missing-template '{.status.createMayExist}{.status.journal.createMayExist}')" = "false" ] \
   || fail "rejected create still marked as possibly existing"
-run kctl delete ossb missing-template -n "${NAMESPACE}" --timeout=60s
+run kctl delete ossbx missing-template -n "${NAMESPACE}" --timeout=60s
 pass "rejected resource deleted without manual finalizer removal"
 
 step "6. Delete the resource; the finalizer waits until the gateway sandbox is gone"
 echo "Finalizers: $(jp support-agent '{.metadata.finalizers}')"
-run kctl delete ossb support-agent -n "${NAMESPACE}" "--timeout=${TIMEOUT}s"
+run kctl delete ossbx support-agent -n "${NAMESPACE}" "--timeout=${TIMEOUT}s"
 if os sandbox get "${sandbox}" --workspace "${WORKSPACE}" >/dev/null 2>&1; then
   fail "gateway sandbox ${sandbox} still exists after finalizer removal"
 fi

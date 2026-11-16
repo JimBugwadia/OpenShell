@@ -90,7 +90,7 @@ kubectl --context "$KUBE_CONTEXT" wait --for=condition=Ready \
   openshellsandbox/support-agent-demo
 ```
 
-You can use the short name `ossb` in place of `openshellsandboxes`. The list
+You can use the short name `ossbx` in place of `openshellsandboxes`. The list
 shows the Phase, Reason, Gateway Phase, and Age columns. The top-level status
 fields `phase`, `reason`, `conditions`, `sandboxName`, `sandboxId`, and
 `gatewayPhase` are for you. `status.journal` holds the controller's recovery

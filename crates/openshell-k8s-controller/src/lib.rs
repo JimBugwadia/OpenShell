@@ -50,7 +50,7 @@ pub fn next_observation(status: &SandboxStatus, now: i64, deleting: bool) -> i64
     version = "v1alpha1",
     kind = "OpenShellSandbox",
     plural = "openshellsandboxes",
-    shortname = "ossb",
+    shortname = "ossbx",
     namespaced,
     status = "SandboxStatus",
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,

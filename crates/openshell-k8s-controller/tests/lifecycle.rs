@@ -363,7 +363,7 @@ fn generated_crd_has_no_unsigned_formats_and_exposes_printer_columns() {
     assert!(!text.contains("\"format\":\"uint"));
     assert_eq!(
         crd["spec"]["names"]["shortNames"],
-        serde_json::json!(["ossb"])
+        serde_json::json!(["ossbx"])
     );
     let columns: Vec<_> = crd["spec"]["versions"][0]["additionalPrinterColumns"]
         .as_array()
