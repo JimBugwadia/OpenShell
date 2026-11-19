@@ -45,6 +45,23 @@ openshell sandbox create --template gpu-kata --provider github -- claude
 
 The `--template` flag cannot be combined with inline workload flags such as `--from`, `--cpu`, `--memory`, `--gpu`, `--env`, or `--driver-config-json`. Put those values on the template instead. Create-time policy and provider attachments remain part of the sandbox request, so each sandbox can keep its own access boundary.
 
+## Template Revisions
+
+Templates can't be changed after you create them. To publish a new version, create it as a revision of a template family by labeling it with `openshell.ai/template-family` and an increasing `openshell.ai/template-generation`:
+
+```shell
+openshell sandbox template create agent-r2 \
+  --image registry.example.com/agent:v2 \
+  --label openshell.ai/template-family=agent \
+  --label openshell.ai/template-generation=2
+```
+
+When `--template` names a family instead of a template, the gateway uses the revision with the highest generation. A template whose name matches exactly always wins. Each sandbox records the revision it was created from, shown as `Workload template` in `openshell sandbox get`, so publishing a new revision never changes existing sandboxes.
+
+```shell
+openshell sandbox create --template agent -- claude
+```
+
 ## Manage Templates
 
 ```shell

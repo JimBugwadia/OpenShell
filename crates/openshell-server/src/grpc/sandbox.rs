@@ -643,12 +643,9 @@ async fn handle_create_sandbox_inner(
         (spec, None)
     } else {
         let governance_spec = request.spec.unwrap_or_default();
-        let template = state
-            .store
-            .get_message_by_name::<SandboxWorkloadTemplate>(&workspace, &workload_template_name)
-            .await
-            .map_err(|e| Status::internal(format!("fetch sandbox template failed: {e}")))?
-            .ok_or_else(|| Status::not_found("sandbox template not found"))?;
+        let template =
+            resolve_workload_template(state.store.as_ref(), &workspace, &workload_template_name)
+                .await?;
         let provenance = SandboxWorkloadTemplateProvenance {
             name: template.object_name().to_string(),
             resource_version: template.get_resource_version().to_string(),
@@ -1021,6 +1018,64 @@ fn validate_template_create_governance_spec(spec: &SandboxSpec) -> Result<(), St
         ));
     }
     Ok(())
+}
+
+/// Label naming the template family that a revision belongs to.
+const TEMPLATE_FAMILY_LABEL: &str = "openshell.ai/template-family";
+/// Label holding a revision's generation within its family, as a decimal integer.
+const TEMPLATE_GENERATION_LABEL: &str = "openshell.ai/template-generation";
+/// Upper bound on revisions considered when resolving a family name.
+const MAX_TEMPLATE_REVISIONS: u32 = 1000;
+
+/// Resolve a workload template by name.
+///
+/// An exact template name wins. Otherwise the name is treated as a template
+/// family, and the revision with the highest generation label is used. This
+/// lets callers such as session execution layers name a template whose
+/// declared owner, such as the Kubernetes controller, publishes immutable
+/// revisions. The sandbox records the resolved revision as its provenance.
+async fn resolve_workload_template(
+    store: &crate::persistence::Store,
+    workspace: &str,
+    name: &str,
+) -> Result<SandboxWorkloadTemplate, Status> {
+    if let Some(template) = store
+        .get_message_by_name::<SandboxWorkloadTemplate>(workspace, name)
+        .await
+        .map_err(|e| Status::internal(format!("fetch sandbox template failed: {e}")))?
+    {
+        return Ok(template);
+    }
+    let revisions = store
+        .list_messages_with_selector::<SandboxWorkloadTemplate>(
+            workspace,
+            &format!("{TEMPLATE_FAMILY_LABEL}={name}"),
+            MAX_TEMPLATE_REVISIONS,
+            0,
+        )
+        .await
+        .map_err(|e| Status::internal(format!("list sandbox templates failed: {e}")))?;
+    latest_template_revision(revisions)
+        .ok_or_else(|| Status::not_found("sandbox template not found"))
+}
+
+/// The revision with the highest generation label. Revisions without a valid
+/// generation are ignored.
+fn latest_template_revision(
+    revisions: Vec<SandboxWorkloadTemplate>,
+) -> Option<SandboxWorkloadTemplate> {
+    revisions
+        .into_iter()
+        .filter_map(|template| {
+            let generation = template
+                .object_labels()?
+                .get(TEMPLATE_GENERATION_LABEL)?
+                .parse::<u64>()
+                .ok()?;
+            Some((generation, template))
+        })
+        .max_by_key(|(generation, _)| *generation)
+        .map(|(_, template)| template)
 }
 
 fn sandbox_spec_from_stored_workload_template(
@@ -8690,6 +8745,78 @@ mod tests {
         )
         .await
         .expect_err("deleted template should not be fetchable");
+        assert_eq!(missing.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn create_sandbox_resolves_a_template_family_to_its_latest_revision() {
+        let state = test_server_state().await;
+        for (name, generation) in [("agent-r1", "1"), ("agent-r10", "10"), ("agent-r2", "2")] {
+            let mut template = test_workload_template(name);
+            let labels = &mut template.metadata.as_mut().expect("metadata").labels;
+            labels.insert(TEMPLATE_FAMILY_LABEL.to_string(), "agent".to_string());
+            labels.insert(
+                TEMPLATE_GENERATION_LABEL.to_string(),
+                generation.to_string(),
+            );
+            handle_create_sandbox_template(
+                &state,
+                authed_request(CreateSandboxTemplateRequest {
+                    request_id: String::new(),
+                    template: Some(template),
+                    workspace_scope: Some(openshell_core::proto::workspace_selector(
+                        "default".to_string(),
+                    )),
+                }),
+            )
+            .await
+            .expect("template create should succeed");
+        }
+        let create = |workload_template: &str| CreateSandboxRequest {
+            request_id: String::new(),
+            name: String::new(),
+            spec: Some(SandboxSpec::default()),
+            labels: HashMap::new(),
+            annotations: HashMap::new(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector(
+                "default".to_string(),
+            )),
+            await_main_process_attachment: false,
+            workload_template: workload_template.to_string(),
+            service_exposures: Vec::new(),
+        };
+
+        let session = handle_create_sandbox(&state, authed_request(create("agent")))
+            .await
+            .expect("family name should resolve")
+            .into_inner()
+            .sandbox
+            .expect("created sandbox");
+        assert_eq!(
+            session
+                .created_from_workload_template
+                .as_ref()
+                .map(|provenance| provenance.name.as_str()),
+            Some("agent-r10")
+        );
+
+        let pinned = handle_create_sandbox(&state, authed_request(create("agent-r2")))
+            .await
+            .expect("an exact name still wins")
+            .into_inner()
+            .sandbox
+            .expect("created sandbox");
+        assert_eq!(
+            pinned
+                .created_from_workload_template
+                .as_ref()
+                .map(|provenance| provenance.name.as_str()),
+            Some("agent-r2")
+        );
+
+        let missing = handle_create_sandbox(&state, authed_request(create("unknown")))
+            .await
+            .expect_err("an unknown family is not found");
         assert_eq!(missing.code(), tonic::Code::NotFound);
     }
 
