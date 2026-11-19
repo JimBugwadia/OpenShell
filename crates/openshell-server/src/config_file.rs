@@ -162,10 +162,10 @@ pub struct GatewayFileSection {
     /// Explicit activation only after the compatible deployment rollout ends.
     #[serde(default)]
     pub enable_sandbox_updates: Option<bool>,
-    /// Identities allowed to provision and change sandboxes; omit or leave
-    /// empty to allow any authorized caller.
+    /// Per workspace, the identities allowed to provision and change its
+    /// sandboxes. Workspaces without an entry allow any authorized caller.
     #[serde(default)]
-    pub sandbox_managers: Option<Vec<String>>,
+    pub sandbox_managers: Option<BTreeMap<String, Vec<String>>>,
     #[serde(default)]
     pub grpc_rate_limit_requests: Option<u64>,
     #[serde(default)]
@@ -1531,21 +1531,26 @@ fn parse_and_validate(path: &Path, contents: &str) -> Result<ConfigFile, ConfigF
             message: "must be greater than zero; omit the key to use the built-in default",
         });
     }
-    // A malformed manager entry matches no caller and would block every write.
-    if let Some(managers) = &file.openshell.gateway.sandbox_managers
-        && managers.iter().any(|manager| {
-            !crate::auth::sandbox_managers::MANAGER_ID_PREFIXES
-                .iter()
-                .any(|prefix| {
-                    manager
-                        .strip_prefix(prefix)
-                        .is_some_and(|rest| !rest.is_empty())
+    // A malformed manager entry matches no caller and would block every write,
+    // and an empty list would look restrictive while allowing everyone.
+    if let Some(workspaces) = &file.openshell.gateway.sandbox_managers
+        && workspaces.iter().any(|(workspace, managers)| {
+            workspace.trim().is_empty()
+                || managers.is_empty()
+                || managers.iter().any(|manager| {
+                    !crate::auth::sandbox_managers::MANAGER_ID_PREFIXES
+                        .iter()
+                        .any(|prefix| {
+                            manager
+                                .strip_prefix(prefix)
+                                .is_some_and(|rest| !rest.is_empty())
+                        })
                 })
         })
     {
         return Err(ConfigFileError::InvalidValue {
             field: "openshell.gateway.sandbox_managers",
-            message: "each entry must be <provider>:<subject>, where provider is oidc, mtls, operator, cloudflare_access, or local_dev",
+            message: "must map each workspace name to a non-empty list of <provider>:<subject> entries, where provider is oidc, mtls, operator, cloudflare_access, or local_dev",
         });
     }
     // A zero-sized lock pool would time out every guarded mutation.
@@ -2909,16 +2914,18 @@ allow_unauthenticated_users = true
     }
 
     #[test]
-    fn parses_sandbox_managers() {
+    fn parses_sandbox_managers_per_workspace() {
         let tmp = write_tmp(
             r#"
-[openshell.gateway]
-sandbox_managers = ["mtls:openshell-k8s-controller", "oidc:ci-bot"]
+[openshell.gateway.sandbox_managers]
+agents = ["mtls:openshell-k8s-controller", "oidc:ci-bot"]
+sessions = ["mtls:sessions"]
 "#,
         );
         let file = load(tmp.path()).expect("valid sandbox managers parse");
+        let managers = file.openshell.gateway.sandbox_managers.expect("managers");
         assert_eq!(
-            file.openshell.gateway.sandbox_managers.as_deref(),
+            managers.get("agents").map(Vec::as_slice),
             Some(
                 &[
                     "mtls:openshell-k8s-controller".to_string(),
@@ -2926,6 +2933,7 @@ sandbox_managers = ["mtls:openshell-k8s-controller", "oidc:ci-bot"]
                 ][..]
             )
         );
+        assert_eq!(managers.len(), 2);
     }
 
     #[test]
@@ -2934,9 +2942,10 @@ sandbox_managers = ["mtls:openshell-k8s-controller", "oidc:ci-bot"]
             r#"["openshell-k8s-controller"]"#,
             r#"["mtls:"]"#,
             r#"["ldap:bot"]"#,
+            "[]",
         ] {
             let tmp = write_tmp(&format!(
-                "[openshell.gateway]\nsandbox_managers = {value}\n"
+                "[openshell.gateway.sandbox_managers]\nagents = {value}\n"
             ));
             assert!(load(tmp.path()).is_err(), "{value} must be rejected");
         }

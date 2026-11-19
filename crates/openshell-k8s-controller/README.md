@@ -181,15 +181,17 @@ kubectl wait --for=condition=Ready openshellsandbox/support-agent -n agents
 
 ## Sandbox managers
 
-Run the controller against a gateway whose `sandbox_managers` setting lists
-only the controller's identity, for example `mtls:<certificate CN>` or
-`oidc:<token sub>`. The gateway then rejects sandbox changes from every other
-caller, so each sandbox has one writer, while the CLI and SDK can still list
-sandboxes, read logs, and exec. See `sandbox_managers` in the gateway
-configuration reference. If the controller isn't a listed manager, creates fail
-with reason `CreateRejected`. When several controllers share a gateway, each one can
-change only the sandboxes it created. The gateway refuses to start if you change
-the list while sandboxes exist.
+List the controller's identity, for example `mtls:<certificate CN>` or
+`oidc:<token sub>`, as the sandbox manager of the workspace bound with
+`--workspace`, in the gateway's `[openshell.gateway.sandbox_managers]` table.
+The gateway then rejects sandbox changes in that workspace from every other
+caller, so each sandbox there has one writer and a resource, while the CLI and
+SDK can still list sandboxes, read logs, and exec. Other workspaces on the same
+gateway keep their own rules. See `sandbox_managers` in the gateway
+configuration reference. If the controller isn't a manager of its workspace,
+creates fail with reason `CreateRejected`. When several controllers share a
+workspace, each one can change only the sandboxes it created. The gateway
+refuses to start if you change a workspace's list while it has sandboxes.
 
 Each gateway sandbox carries `kubernetes.openshell.ai/namespace`, `name`, and
 `uid` annotations that point back to its resource. They are informational; the
@@ -197,7 +199,8 @@ controller never infers ownership from them.
 
 ## Safety limits
 
-Without `sandbox_managers`, this is not gateway-enforced ownership. Existing public `DeleteSandbox` accepts
+Without a `sandbox_managers` entry for its workspace, this is not
+gateway-enforced ownership. Existing public `DeleteSandbox` accepts
 only a name and has no caller-supplied ID/resource-version precondition. The
 controller checks the recorded ID immediately before deletion, but a concurrent
 writer could replace the object between lookup and delete. Use a dedicated

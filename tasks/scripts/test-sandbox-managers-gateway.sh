@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Live test of the gateway's experimental sandbox_managers setting.
+# Live test of the gateway's experimental per-workspace sandbox_managers setting,
+# applied here to the default workspace.
 #
 # Runs a gateway built from this checkout on its own port, with mTLS user
 # authentication and three client identities:
 #   openshell-k8s-controller  the listed sandbox manager
 #   openshell-cli             an ordinary user
-#   agent-executor            a second manager that creates a session sandbox
-#                             per conversation, standing in for the proposed
-#                             gateway Sessions API
+#   agent-executor            a second manager: a service that creates a
+#                             sandbox per conversation with CreateSandbox
 #   oncall (OU=operator)      an operator, for emergency stop and delete
 # It checks that only managers provision, that everyone can still read,
 # that the operator can delete in an emergency, that the gateway refuses to
@@ -123,7 +123,9 @@ version = 2
 name = "${GW_NAME}"
 compute_driver = "docker"
 guest_tls_ca = "${STATE}/pki/ca.crt"
-sandbox_managers = ${managers}
+
+[openshell.gateway.sandbox_managers]
+default = ${managers}
 
 [openshell.gateway.gateway_jwt]
 signing_key_path = "${STATE}/pki/jwt/signing.pem"
@@ -218,7 +220,7 @@ write_config '["mtls:openshell-k8s-controller", "mtls:agent-executor", "mtls:som
 if start_gateway; then
   fail "the gateway started with a changed managers list"
 fi
-grep -A4 "sandbox_managers changed" "${GATEWAY_LOG}" | tr '\n' ' ' | tr -s ' │' ' ' | cut -c1-260; echo
+grep -A4 "changed from" "${GATEWAY_LOG}" | tr '\n' ' ' | tr -s ' │' ' ' | cut -c1-260; echo
 pass "startup refused with the changed list"
 write_config "${MANAGERS}"
 start_gateway || fail "the gateway did not restart with the original list"

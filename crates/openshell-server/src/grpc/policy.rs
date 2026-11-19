@@ -4239,17 +4239,6 @@ async fn handle_update_config_inner(
         replay_facts.global()?;
         None
     } else {
-        // Sandbox-scoped changes are restricted to the gateway's sandbox
-        // managers; the router can't see the scope in the request body.
-        let managers = crate::auth::sandbox_managers::SandboxManagers::new(
-            state.config.sandbox_managers.clone(),
-            state.admin_role.clone(),
-        );
-        if !managers.permits_changes(principal) {
-            return Err(Status::permission_denied(
-                crate::auth::sandbox_managers::NOT_A_MANAGER,
-            ));
-        }
         let min_role = if sandbox_caller {
             MinWorkspaceRole::User
         } else {

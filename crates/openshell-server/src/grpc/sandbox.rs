@@ -195,7 +195,7 @@ pub(super) async fn fetch_and_authorize_sandbox(
 /// Missing and unauthorized objects deliberately share one response so names
 /// cannot be used as an existence oracle.
 /// Rejects a change to `sandbox` from anyone but the manager recorded on it,
-/// when the gateway has sandbox managers. `emergency` allows operators and
+/// when its workspace has sandbox managers. `emergency` allows operators and
 /// admins to stop or delete it.
 pub(super) fn require_recorded_manager(
     state: &ServerState,
@@ -215,10 +215,29 @@ pub(super) fn require_recorded_manager(
         .as_ref()
         .and_then(|metadata| metadata.annotations.get(SANDBOX_MANAGER_ANNOTATION))
         .map(String::as_str);
-    if managers.permits_sandbox(principal, recorded, emergency) {
+    if managers.permits_sandbox(principal, sandbox.object_workspace(), recorded, emergency) {
         Ok(())
     } else {
         Err(Status::permission_denied(NOT_THE_RECORDED_MANAGER))
+    }
+}
+
+/// Rejects provisioning in `workspace` from anyone but its sandbox managers,
+/// when it has them.
+pub(super) fn require_workspace_manager(
+    state: &ServerState,
+    principal: &crate::auth::principal::Principal,
+    workspace: &str,
+) -> Result<(), Status> {
+    use crate::auth::sandbox_managers::{NOT_A_MANAGER, SandboxManagers};
+    let managers = SandboxManagers::new(
+        state.config.sandbox_managers.clone(),
+        state.admin_role.clone(),
+    );
+    if managers.permits_changes(principal, workspace) {
+        Ok(())
+    } else {
+        Err(Status::permission_denied(NOT_A_MANAGER))
     }
 }
 
@@ -493,6 +512,7 @@ pub(super) async fn handle_begin_rootfs_tar_staging(
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &authz.workspace)
         .await?
         .ensure_active()?;
+    require_workspace_manager(state, &principal, &workspace)?;
 
     let subject = principal_subject(&principal)?;
     let slot = state.compute.rootfs_tar_staging().begin(
@@ -635,6 +655,14 @@ async fn handle_create_sandbox_inner(
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &authz.workspace)
         .await?
         .ensure_active()?;
+    require_workspace_manager(state, &principal, &workspace)?;
+    let managers_in_effect = crate::auth::sandbox_managers::canonical(
+        state
+            .config
+            .sandbox_managers
+            .get(&workspace)
+            .map_or(&[][..], Vec::as_slice),
+    );
 
     let (mut spec, created_from_workload_template) = if workload_template_name.is_empty() {
         let spec = request
@@ -850,18 +878,18 @@ async fn handle_create_sandbox_inner(
         .map_err(|error| Status::internal(error.to_string()))?;
     if let Some(metadata) = sandbox.metadata.as_mut() {
         runtime_identity.write(&mut metadata.annotations);
-        // Record the creator so per-workspace or mixed managers can be added
-        // later without a data migration.
+        // Record the creator, so only it can change the sandbox in a workspace
+        // with sandbox managers.
         if let Some(manager) = crate::auth::sandbox_managers::manager_id(&principal) {
             metadata.annotations.insert(
                 crate::auth::sandbox_managers::SANDBOX_MANAGER_ANNOTATION.to_string(),
                 manager,
             );
         }
-        // Lets the gateway refuse to start if the list later changes.
+        // Lets the gateway refuse to start if the workspace's list later changes.
         metadata.annotations.insert(
             crate::auth::sandbox_managers::SANDBOX_MANAGERS_CONFIG_ANNOTATION.to_string(),
-            crate::auth::sandbox_managers::canonical(&state.config.sandbox_managers),
+            managers_in_effect,
         );
     }
     let launch_authentication = if let Some(authority) = &state.sandbox_session_jwt_authority {
@@ -1961,7 +1989,7 @@ async fn handle_delete_sandbox_inner(
         .map_err(|error| Status::internal(format!("fetch sandbox failed: {error}")))?
     {
         require_recorded_manager(state, &principal, &sandbox, true)?;
-        if !state.config.sandbox_managers.is_empty() {
+        if state.config.sandbox_managers.contains_key(&workspace) {
             // Delete the sandbox whose manager was checked, never a replacement.
             preconditions.expected_sandbox_id = Some(sandbox.object_id().to_string());
         }
@@ -8009,6 +8037,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sandbox_managers_apply_only_to_their_workspace() {
+        let mut state = test_server_state().await;
+        Arc::get_mut(&mut state)
+            .expect("unique state")
+            .config
+            .sandbox_managers = std::collections::BTreeMap::from([(
+            "agents".to_string(),
+            vec!["mtls:openshell-k8s-controller".to_string()],
+        )]);
+        crate::grpc::workspace::handle_create_workspace(
+            &state,
+            Request::new(openshell_core::proto::CreateWorkspaceRequest {
+                request_id: String::new(),
+                name: "agents".to_string(),
+                labels: HashMap::new(),
+            }),
+        )
+        .await
+        .expect("agents workspace should be created");
+        let create = |workspace: &str| CreateSandboxRequest {
+            request_id: String::new(),
+            name: String::new(),
+            spec: Some(SandboxSpec::default()),
+            labels: HashMap::new(),
+            annotations: HashMap::new(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector(workspace)),
+            await_main_process_attachment: false,
+            workload_template: String::new(),
+            service_exposures: Vec::new(),
+        };
+
+        // oidc:dev-user isn't a manager of agents, so it can't provision there.
+        let denied = handle_create_sandbox(&state, authed_request(create("agents")))
+            .await
+            .expect_err("a non-manager can't provision in a managed workspace");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            denied.message(),
+            crate::auth::sandbox_managers::NOT_A_MANAGER
+        );
+
+        // Other workspaces on the same gateway keep the default behavior.
+        let created = handle_create_sandbox(&state, authed_request(create("default")))
+            .await
+            .expect("an unmanaged workspace allows any authorized caller")
+            .into_inner()
+            .sandbox
+            .expect("created sandbox");
+        assert_eq!(
+            created.metadata.as_ref().and_then(|metadata| metadata
+                .annotations
+                .get(crate::auth::sandbox_managers::SANDBOX_MANAGERS_CONFIG_ANNOTATION)),
+            Some(&"[]".to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn only_the_recorded_manager_or_an_admin_deletes_a_sandbox() {
         use crate::auth::identity::{Identity, IdentityProvider};
         use crate::auth::principal::{Principal, UserPrincipal};
@@ -8022,7 +8107,10 @@ mod tests {
         let mut state = test_server_state().await;
         {
             let state = Arc::get_mut(&mut state).expect("unique state");
-            state.config.sandbox_managers = vec!["mtls:cluster-a".into(), "mtls:cluster-b".into()];
+            state.config.sandbox_managers = std::collections::BTreeMap::from([(
+                "default".to_string(),
+                vec!["mtls:cluster-a".into(), "mtls:cluster-b".into()],
+            )]);
             state.admin_role = "openshell-admin".into();
         }
         let as_principal = |cn: &str, roles: &[&str]| {

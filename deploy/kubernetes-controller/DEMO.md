@@ -219,18 +219,18 @@ DEMO_PAUSE=1 tasks/scripts/test-sandbox-managers-gateway.sh
 It starts a gateway from this checkout with:
 
 ```toml
-[openshell.gateway]
-sandbox_managers = ["mtls:openshell-k8s-controller", "mtls:agent-executor"]
+[openshell.gateway.sandbox_managers]
+default = ["mtls:openshell-k8s-controller", "mtls:agent-executor"]
 ```
 
 and four client certificates: `openshell-k8s-controller` (a manager),
-`agent-executor` (a second manager that creates session sandboxes, standing in
-for the proposed Sessions API), `openshell-cli` (an ordinary user), and
+`agent-executor` (a second manager: a service that creates a sandbox per
+conversation with the existing sandbox API), `openshell-cli` (an ordinary user), and
 `oncall` with `OU=operator`.
 
 | Step | What happens | Point out |
 | :- | :- | :- |
-| 1 | `openshell-cli` tries `sandbox create` | Rejected: "this gateway's sandboxes are managed by another identity" |
+| 1 | `openshell-cli` tries `sandbox create` | Rejected: "this workspace's sandboxes are managed by another identity" |
 | 2 | `openshell-k8s-controller` creates `managed-1` | The sandbox records `internal.openshell.ai/sandbox-manager: mtls:openshell-k8s-controller` and the list in effect |
 | 3 | `openshell-cli` lists, then tries `delete` and `stop` | Reading works; changes are rejected |
 | 4 | The gateway restarts with an extra manager in the list | It refuses to start while sandboxes exist, and starts again with the original list |

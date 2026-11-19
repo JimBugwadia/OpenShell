@@ -267,10 +267,10 @@ pub struct Config {
     /// Disabled by default; not a license to run mixed-version writers.
     pub enable_sandbox_updates: bool,
 
-    /// Provider-qualified identities allowed to provision and change sandboxes,
-    /// such as `mtls:<certificate CN>` or `oidc:<sub>`. Empty allows any
-    /// authorized caller.
-    pub sandbox_managers: Vec<String>,
+    /// Per workspace, the provider-qualified identities allowed to provision
+    /// and change its sandboxes, such as `mtls:<certificate CN>` or
+    /// `oidc:<sub>`. A workspace without an entry allows any authorized caller.
+    pub sandbox_managers: BTreeMap<String, Vec<String>>,
 
     /// Disabled-by-default gateway interceptor service configs.
     pub gateway_interceptors: Vec<GatewayInterceptorConfig>,
@@ -1056,7 +1056,7 @@ impl Config {
             auth: GatewayAuthConfig::default(),
             enable_websocket_tunnel: false,
             enable_sandbox_updates: false,
-            sandbox_managers: Vec::new(),
+            sandbox_managers: BTreeMap::new(),
             gateway_interceptors: Vec::new(),
             provider_profile_sources: vec![GatewayProviderProfileSourceConfig::User],
             mtls_auth: MtlsAuthConfig::default(),

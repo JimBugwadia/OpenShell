@@ -51,7 +51,6 @@ use crate::{
     auth::identity::Identity,
     auth::oidc::{self, OidcAuthenticator},
     auth::principal::{OperatorPrincipal, Principal, UserPrincipal},
-    auth::sandbox_managers::{self, SandboxManagers},
     auth::workspace_authz::{MinWorkspaceRole, authorize_workspace},
     http_router, service_http_router,
 };
@@ -336,11 +335,7 @@ impl MultiplexService {
         .with_peer_certificate(certificate_sha256)
         .with_operator(operator)
         .with_connection_source(source)
-        .with_logons(self.state.logons.clone())
-        .with_sandbox_managers(SandboxManagers::new(
-            self.state.config.sandbox_managers.clone(),
-            self.state.admin_role.clone(),
-        ));
+        .with_logons(self.state.logons.clone());
         let grpc_service =
             GrpcRateLimitService::new(grpc_service, self.state.grpc_rate_limiter.clone());
         let http_service = http_router(self.state.clone());
@@ -1153,7 +1148,6 @@ pub struct AuthGrpcRouter<S> {
     operator: Option<OperatorPrincipal>,
     connection_source: Option<ConnectionSource>,
     logons: audit::Logons,
-    sandbox_managers: SandboxManagers,
 }
 
 impl<S> AuthGrpcRouter<S> {
@@ -1185,14 +1179,7 @@ impl<S> AuthGrpcRouter<S> {
             operator: None,
             connection_source: None,
             logons: audit::Logons::default(),
-            sandbox_managers: SandboxManagers::default(),
         }
-    }
-
-    /// Restrict sandbox changes to the gateway's configured managers.
-    fn with_sandbox_managers(mut self, sandbox_managers: SandboxManagers) -> Self {
-        self.sandbox_managers = sandbox_managers;
-        self
     }
 
     fn with_operator(mut self, operator: Option<OperatorPrincipal>) -> Self {
@@ -1260,7 +1247,6 @@ where
         let connection_source = self.connection_source;
         let logons = self.logons.clone();
         let peer_certificate_sha256 = self.peer_certificate_sha256.clone();
-        let sandbox_managers = self.sandbox_managers.clone();
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
@@ -1406,14 +1392,6 @@ where
                 | Principal::Peer(_)
                 | Principal::Supervisor(_) => None,
             };
-            let denial = denial.or_else(|| {
-                (!sandbox_managers.permits(&principal, &path)).then(|| {
-                    (
-                        AuthzDenial::MethodNotPermitted,
-                        tonic::Status::permission_denied(sandbox_managers::NOT_A_MANAGER),
-                    )
-                })
-            });
             if let Some((denial, status)) = denial {
                 audit::emit_authorization_denial_for(&path, &origin, &principal, denial);
                 return Ok(status_response(status));
@@ -3926,43 +3904,6 @@ mod tests {
                 seen.lock().unwrap().as_ref(),
                 Some(Principal::User(_))
             ));
-        }
-
-        #[tokio::test]
-        async fn sandbox_managers_restrict_changes_but_not_reads() {
-            let managers = SandboxManagers::new(vec!["mtls:openshell-k8s-controller".into()], "");
-            let call = |subject: &'static str, path: &'static str| {
-                let managers = managers.clone();
-                async move {
-                    let (recorder, seen) = PrincipalRecorder::new();
-                    let mut router = AuthGrpcRouter::with_peer_identity(
-                        recorder,
-                        None,
-                        None,
-                        Some(mtls_identity(subject)),
-                        true,
-                        false,
-                    )
-                    .with_sandbox_managers(managers);
-                    let res = router.call(empty_request(path)).await.unwrap();
-                    (grpc_status(&res), seen.lock().unwrap().is_some())
-                }
-            };
-
-            // The CLI's certificate can't provision, but can still read.
-            let (status, reached) =
-                call("openshell-client", "/openshell.v1.OpenShell/CreateSandbox").await;
-            assert_eq!(status.as_deref(), Some("7"));
-            assert!(!reached);
-            let (_, reached) = call("openshell-client", "/openshell.v1.OpenShell/GetSandbox").await;
-            assert!(reached);
-            // The listed controller identity provisions normally.
-            let (_, reached) = call(
-                "openshell-k8s-controller",
-                "/openshell.v1.OpenShell/CreateSandbox",
-            )
-            .await;
-            assert!(reached);
         }
 
         #[tokio::test]
