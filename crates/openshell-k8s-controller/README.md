@@ -19,19 +19,31 @@ there is no leader election or HA support.
 
 ```yaml
 apiVersion: openshell.ai/v1alpha1
+kind: OpenShellSandboxTemplate
+metadata:
+  name: support-agent
+  namespace: agents
+spec:
+  image: registry.example.com/support-agent@sha256:9f2c...
+  resources:
+    cpu: "2"
+    memory: 4Gi
+---
+apiVersion: openshell.ai/v1alpha1
 kind: OpenShellSandbox
 metadata:
   name: support-agent
   namespace: agents
 spec:
-  workloadTemplate: support-agent-v2
+  workloadTemplate: support-agent
 ```
 
-The named workload template must already exist in the gateway workspace selected
-by `--workspace`. The controller does not create templates, policies, or providers.
-Gateway default governance applies; workload templates do not select policy or
-credentials. The entire spec is immutable through a CEL admission transition
-rule. Reapplying equivalent content is allowed. Change the workload by creating a
+`workloadTemplate` names an `OpenShellSandboxTemplate` in the same namespace or,
+if none exists, a workload template that already exists in the gateway
+workspace selected by `--workspace`. The controller doesn't create policies or
+providers. Gateway default governance applies; workload templates do not select
+policy or credentials. The entire sandbox spec is immutable through a CEL
+admission transition rule. Reapplying equivalent content is allowed. Change the workload by creating a
 new resource, not by updating an existing resource.
 
 The trusted flags bind exactly one namespace to one gateway URL and workspace.
@@ -88,6 +100,30 @@ while operations are outstanding is unsupported.
   Equivalent status is not rewritten; writes use Kubernetes resource-version
   preconditions and preserve other finalizers.
 
+## Templates
+
+An `OpenShellSandboxTemplate` (short name `ossbxt`) carries the image,
+environment, and resources. Its spec is mutable, because gateway templates
+aren't: the controller publishes each generation as an immutable gateway
+template named `<name>-r<generation>`, with a deterministic request ID, and
+labels it `openshell.ai/template-family=<name>`,
+`openshell.ai/template-generation=<generation>`, and
+`kubernetes.openshell.ai/uid=<resource UID>`. Status reports the published
+revision in `currentRevision`, and the `Ready` condition is `True` only for
+the current generation.
+
+- A sandbox resolves its template once, before its first submission, and pins
+  the revision in its journal and in `status.templateRevision`. A sandbox
+  whose template isn't published yet waits without writing status.
+- Callers that create sandboxes on demand name the family, and the gateway
+  uses the revision with the highest generation; an exact template name
+  always wins.
+- A revision with the same name but another owner's UID label blocks the
+  template with reason `NameCollision`; it's never adopted.
+- Deleting the template resource deletes all its revisions. Sandboxes keep the
+  workload they were created with. Old revisions otherwise stay until then.
+- The controller identity must be a workspace admin to publish templates.
+
 ## Status
 
 Top-level fields are for users. `status.journal` is the controller's recovery
@@ -107,6 +143,7 @@ status:
       observedGeneration: 1
   sandboxName: os-fd229996bc63413e
   sandboxId: 3b0c6f9e-2f44-4d7a-9a51-6f1f1c2b8e10
+  templateRevision: support-agent-r1
   gatewayPhase: Ready
   journal:
     binding:
@@ -119,7 +156,7 @@ status:
       createRequestId: fd229996-bc63-413e-9dc0-cc5f05abe5bd
       deleteRequestId: fd229996-bc63-413e-9dc0-cc5f05abe5bc
       createStartedAt: "2026-11-13T18:03:58Z"
-      workloadTemplate: support-agent-v2
+      workloadTemplate: support-agent-r1
     createAttempts: 1
     deleteAttempts: 0
     deleteStartedAt: null
@@ -134,7 +171,9 @@ every status write. The condition is `True` when the phase is `Ready`,
 changes. The condition message is fixed text selected by the reason.
 
 `kubectl get openshellsandboxes` (short name `ossbx`) shows the Phase, Reason,
-Gateway Phase, and Age columns. To wait for readiness, run:
+Gateway Phase, and Age columns. `gatewayPhase` is informational and never
+affects health; start the controller with `--report-gateway-phase false` to
+omit it, so a sandbox sleeping and waking causes no status writes. To wait for readiness, run:
 
 ```shell
 kubectl wait --for=condition=Ready openshellsandbox/support-agent -n agents

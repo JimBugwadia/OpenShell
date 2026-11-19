@@ -8,6 +8,8 @@ use kube::{CustomResource, CustomResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod template;
+
 pub const FINALIZER: &str = "openshell.ai/gateway-cleanup";
 pub const READY_CONDITION: &str = "Ready";
 const REPLAY_SECONDS: i64 = 23 * 60 * 60;
@@ -60,7 +62,8 @@ pub fn next_observation(status: &SandboxStatus, now: i64, deleting: bool) -> i64
 )]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxSpec {
-    /// Existing workspace-scoped gateway workload template. No credentials in the CR.
+    /// An `OpenShellSandboxTemplate` in the same namespace, or else an existing
+    /// gateway workload template. No credentials in the CR.
     #[schemars(length(min = 1, max = 253))]
     pub workload_template: String,
 }
@@ -169,6 +172,12 @@ pub struct SandboxStatus {
     pub conditions: Vec<Condition>,
     pub sandbox_name: String,
     pub sandbox_id: Option<String>,
+    /// Gateway template the sandbox was created from: a revision of an
+    /// `OpenShellSandboxTemplate`, or a template that already existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_revision: Option<String>,
+    /// Informational runtime phase. Never affects `phase` or the `Ready`
+    /// condition, and is omitted when the controller doesn't report it.
     pub gateway_phase: Option<String>,
     pub journal: Journal,
 }
@@ -186,6 +195,7 @@ impl SandboxStatus {
             conditions: Vec::new(),
             sandbox_name: binding.sandbox_name.clone(),
             sandbox_id: None,
+            template_revision: Some(binding.workload_template.clone()),
             gateway_phase: None,
             journal: Journal {
                 binding,
@@ -250,28 +260,40 @@ fn ready_status(phase: &str, reason: &str) -> ConditionStatus {
 ///
 /// `lastTransitionTime` changes only when the condition status changes.
 pub fn sync_conditions(status: &mut SandboxStatus, now: i64) {
-    let desired = ready_status(&status.phase, &status.reason);
-    let reason = status.reason.clone();
-    let message = ready_message(&status.phase, &status.reason).to_owned();
-    let generation = status.observed_generation;
-    if let Some(condition) = status
-        .conditions
-        .iter_mut()
-        .find(|c| c.type_ == READY_CONDITION)
-    {
+    sync_condition(
+        &mut status.conditions,
+        ready_status(&status.phase, &status.reason),
+        &status.reason,
+        ready_message(&status.phase, &status.reason),
+        status.observed_generation,
+        now,
+    );
+}
+
+/// Set the `Ready` condition. `lastTransitionTime` changes only when its
+/// status changes.
+pub fn sync_condition(
+    conditions: &mut Vec<Condition>,
+    desired: ConditionStatus,
+    reason: &str,
+    message: &str,
+    generation: i64,
+    now: i64,
+) {
+    if let Some(condition) = conditions.iter_mut().find(|c| c.type_ == READY_CONDITION) {
         if condition.status != desired {
             condition.status = desired;
             condition.last_transition_time = now;
         }
-        condition.reason = reason;
-        condition.message = message;
+        condition.reason = reason.into();
+        condition.message = message.into();
         condition.observed_generation = generation;
     } else {
-        status.conditions.push(Condition {
+        conditions.push(Condition {
             type_: READY_CONDITION.into(),
             status: desired,
-            reason,
-            message,
+            reason: reason.into(),
+            message: message.into(),
             last_transition_time: now,
             observed_generation: generation,
         });
@@ -286,10 +308,27 @@ pub fn crd() -> Result<serde_json::Value, serde_json::Error> {
         "rule": "self == oldSelf",
         "message": "spec is immutable; create a new Sandbox for a different workload"
     }]);
+    map_conditions(schema);
+    Ok(value)
+}
+
+/// The template CRD. Its spec is mutable: each generation becomes a new
+/// gateway revision, and existing sandboxes keep the revision they started with.
+pub fn template_crd() -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(template::OpenShellSandboxTemplate::crd())?;
+    map_conditions(&mut value["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]);
+    Ok(value)
+}
+
+/// Every CRD the controller serves, in install order.
+pub fn crds() -> Result<Vec<serde_json::Value>, serde_json::Error> {
+    Ok(vec![crd()?, template_crd()?])
+}
+
+fn map_conditions(schema: &mut serde_json::Value) {
     let conditions = &mut schema["status"]["properties"]["conditions"];
     conditions["x-kubernetes-list-type"] = "map".into();
     conditions["x-kubernetes-list-map-keys"] = serde_json::json!(["type"]);
-    Ok(value)
 }
 
 /// Schema-only marker: an RFC 3339 `date-time` string.

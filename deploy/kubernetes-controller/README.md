@@ -1,18 +1,20 @@
 # OpenShell Kubernetes controller prototype
 
-This package contains the namespaced RBAC and a sample `OpenShellSandbox`. The
+This package contains the namespaced RBAC and a sample `OpenShellSandboxTemplate`
+and `OpenShellSandbox`. The
 controller is run from the source checkout with Cargo; it intentionally has no
 Deployment or container image because this prototype does not publish a
 controller image. Install its CRD from the executable so the served schema and
-the controller stay in sync.
+the controller stay in sync; `--print-crd` prints both CRDs.
 
 ## Requirements
 
 - A Kubernetes cluster and `kubectl` context that you intend to use.
 - Rust toolchain and Cargo from the repository's `rust-toolchain.toml`.
 - An OpenShell gateway reachable from the controller process.
-- An existing workload template in the gateway workspace selected for this
-  controller.
+- A controller identity that is a workspace admin in the gateway workspace, so
+  it can publish template revisions. A sandbox can instead name a workload
+  template that already exists in the gateway.
 
 The controller watches only the namespace, workspace, and gateway URL passed
 at startup. Configure one controller process per binding. It uses the current
@@ -20,9 +22,9 @@ Kubernetes context through the default kubeconfig/in-cluster configuration.
 
 ## Install and run
 
-Choose the namespace, gateway workspace, and gateway URL. This example assumes
-the workload template `support-agent-v2` already exists in workspace
-`support-engineering`; replace those values with real ones.
+Choose the namespace, gateway workspace, and gateway URL; replace the example
+values with real ones. The sample declares the template `support-agent` and a
+sandbox that uses it.
 
 ```shell
 export KUBE_CONTEXT="$(kubectl config current-context)"
@@ -90,18 +92,31 @@ kubectl --context "$KUBE_CONTEXT" wait --for=condition=Ready \
   openshellsandbox/support-agent-demo
 ```
 
-You can use the short name `ossbx` in place of `openshellsandboxes`. The list
+You can use the short names `ossbx` for `openshellsandboxes` and `ossbxt` for
+`openshellsandboxtemplates`. The list
 shows the Phase, Reason, Gateway Phase, and Age columns. The top-level status
 fields `phase`, `reason`, `conditions`, `sandboxName`, `sandboxId`, and
-`gatewayPhase` are for you. A provisioned sandbox stays `Ready` while it is
+`templateRevision`, and `gatewayPhase` are for you. A provisioned sandbox stays `Ready` while it is
 stopped, suspended, or completed; the Gateway Phase column shows its runtime
-phase. `status.journal` holds the controller's recovery
+phase. Start the controller with `--report-gateway-phase false` to omit the
+runtime phase, so sleeping and waking cause no status writes.
+`status.journal` holds the controller's recovery
 journal, including request IDs, attempt counters, and RFC 3339 retry
 timestamps; don't edit it.
 
-The spec is immutable; create a new resource to request a different template.
-The controller creates a gateway sandbox from the named, existing workspace
-template, which supplies the workload image and environment. The CR intentionally
+The sandbox spec is immutable; create a new resource to request a different
+template. `workloadTemplate` names an `OpenShellSandboxTemplate` in the same
+namespace or, if none exists, a gateway template. The controller resolves it
+once, before the first submission, and records the gateway revision in
+`templateRevision`, so later template changes don't affect the sandbox.
+
+A template's spec is mutable. The controller publishes each generation as an
+immutable gateway template named `<name>-r<generation>`, labeled with its
+family and generation, and reports it in `status.currentRevision`. Callers
+that create sandboxes on demand can name the family, such as
+`openshell sandbox create --template support-agent`, and the gateway uses the
+latest revision. Deleting the template resource deletes its revisions;
+sandboxes already created from them keep the workload they started with. The CR intentionally
 has no command or restart-policy overrides; gateway/template defaults apply.
 A `Ready` condition with status `True` means the gateway reports phase
 `Ready`; it is not an application-level health or readiness check. The

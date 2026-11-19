@@ -29,6 +29,7 @@ tonic = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+bytes = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 tower = { workspace = true, features = ["util"] }

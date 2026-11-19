@@ -16,7 +16,10 @@ rules:
     resources: ["openshellsandboxes"]
     verbs: ["list", "watch", "patch"]
   - apiGroups: ["openshell.ai"]
-    resources: ["openshellsandboxes/status"]
+    resources: ["openshellsandboxtemplates"]
+    verbs: ["get", "list", "watch", "patch"]
+  - apiGroups: ["openshell.ai"]
+    resources: ["openshellsandboxes/status", "openshellsandboxtemplates/status"]
     verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

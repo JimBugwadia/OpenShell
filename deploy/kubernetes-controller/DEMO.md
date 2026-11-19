@@ -164,6 +164,39 @@ openshell sandbox get "$NAME" --workspace "$WS"
 Expected: the delete waits for the gateway to remove the sandbox, and the last
 command reports that the sandbox isn't found.
 
+### Step 8 (optional): declare the template in Kubernetes
+
+The script doesn't run this step yet. It needs a controller identity that is a
+workspace admin, because the controller publishes gateway templates.
+
+```shell
+cat <<EOF | kubectl apply -f -
+apiVersion: openshell.ai/v1alpha1
+kind: OpenShellSandboxTemplate
+metadata:
+  name: demo-agent-k8s
+  namespace: agents
+spec:
+  image: ghcr.io/nvidia/openshell/sandbox:0.1.6
+---
+apiVersion: openshell.ai/v1alpha1
+kind: OpenShellSandbox
+metadata:
+  name: templated-agent
+  namespace: agents
+spec:
+  workloadTemplate: demo-agent-k8s
+EOF
+kubectl wait --for=condition=Ready ossbxt/demo-agent-k8s -n agents --timeout=60s
+kubectl get ossbxt -n agents
+kubectl get ossbx templated-agent -n agents -o jsonpath='{.status.templateRevision}{"\n"}'
+```
+
+Expected: the template shows revision `demo-agent-k8s-r1`, and the sandbox
+records the same revision. Change the template's image and apply it again: the
+template publishes `demo-agent-k8s-r2`, and `templated-agent` keeps `r1`. Delete
+both resources when you're done.
+
 ### Clean up
 
 Stop the controller, then:
@@ -187,11 +220,13 @@ It starts a gateway from this checkout with:
 
 ```toml
 [openshell.gateway]
-sandbox_managers = ["mtls:openshell-k8s-controller"]
+sandbox_managers = ["mtls:openshell-k8s-controller", "mtls:agent-executor"]
 ```
 
-and three client certificates: `openshell-k8s-controller` (the manager),
-`openshell-cli` (an ordinary user), and `oncall` with `OU=operator`.
+and four client certificates: `openshell-k8s-controller` (a manager),
+`agent-executor` (a second manager that creates session sandboxes, standing in
+for the proposed Sessions API), `openshell-cli` (an ordinary user), and
+`oncall` with `OU=operator`.
 
 | Step | What happens | Point out |
 | :- | :- | :- |
@@ -200,6 +235,7 @@ and three client certificates: `openshell-k8s-controller` (the manager),
 | 3 | `openshell-cli` lists, then tries `delete` and `stop` | Reading works; changes are rejected |
 | 4 | The gateway restarts with an extra manager in the list | It refuses to start while sandboxes exist, and starts again with the original list |
 | 5 | `oncall` deletes `managed-1` | Operators keep an emergency stop and delete |
+| 6 | Revisions `agent-r1` and `agent-r2` of template family `agent` are published, and `agent-executor` creates `session-1` from `--template agent` | The session resolves to `agent-r2` and records `agent-executor` as its manager; the controller can't delete it |
 
 The script uses a temporary directory for everything, including the CLI's
 configuration, so it doesn't change your registered gateways.

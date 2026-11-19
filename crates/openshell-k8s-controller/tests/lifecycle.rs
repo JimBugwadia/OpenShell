@@ -696,3 +696,70 @@ async fn sleeping_and_waking_keep_health_while_errors_block() {
     }
     assert!(gateway.creates.lock().unwrap().is_empty());
 }
+
+#[test]
+fn template_revisions_are_named_by_generation_within_the_gateway_limit() {
+    use openshell_k8s_controller::template::revision_name;
+    assert_eq!(
+        revision_name("support-agent", 3).as_deref(),
+        Some("support-agent-r3")
+    );
+    assert_eq!(revision_name(&"a".repeat(60), 10), None);
+}
+
+#[test]
+fn template_revision_request_ids_are_stable_and_distinct() {
+    use openshell_k8s_controller::template::revision_request_id;
+    let uid = "fd229996-bc63-413e-9dc0-cc5f05abe5bd";
+    let first = revision_request_id(uid, 1).unwrap();
+    assert_eq!(first, revision_request_id(uid, 1).unwrap());
+    assert_ne!(first, revision_request_id(uid, 2).unwrap());
+    assert_ne!(first, uid);
+    assert!(revision_request_id("not-a-uuid", 1).is_err());
+}
+
+#[test]
+fn template_status_reports_only_the_published_generation_as_ready() {
+    use openshell_k8s_controller::template::{TemplateStatus, apply_publish};
+    let mut status = TemplateStatus::default();
+    apply_publish(&mut status, 1, "agent-r1", Ok(()), 10);
+    assert_eq!(status.ready_revision(1), Some("agent-r1"));
+    assert_eq!(
+        status.ready_revision(2),
+        None,
+        "a newer generation isn't published yet"
+    );
+    assert_eq!(status.conditions[0].status, ConditionStatus::True);
+
+    apply_publish(&mut status, 2, "agent-r2", Err(GatewayError::Uncertain), 20);
+    assert_eq!(
+        (status.phase.as_str(), status.reason.as_str()),
+        ("Progressing", "PublishUncertain")
+    );
+    assert_eq!(status.conditions[0].status, ConditionStatus::Unknown);
+    assert_eq!(status.current_revision.as_deref(), Some("agent-r1"));
+
+    apply_publish(&mut status, 2, "agent-r2", Err(GatewayError::Collision), 30);
+    assert_eq!(
+        (status.phase.as_str(), status.reason.as_str()),
+        ("Blocked", "NameCollision")
+    );
+    apply_publish(&mut status, 2, "agent-r2", Err(GatewayError::Rejected), 40);
+    assert_eq!(status.reason, "PublishRejected");
+}
+
+#[test]
+fn template_crd_is_mutable_and_uses_the_ossbxt_short_name() {
+    use openshell_k8s_controller::template_crd;
+    let crd = template_crd().unwrap();
+    assert_eq!(
+        crd["spec"]["names"]["shortNames"],
+        serde_json::json!(["ossbxt"])
+    );
+    let schema = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"];
+    assert!(schema["spec"].get("x-kubernetes-validations").is_none());
+    assert_eq!(
+        schema["status"]["properties"]["conditions"]["x-kubernetes-list-type"],
+        "map"
+    );
+}

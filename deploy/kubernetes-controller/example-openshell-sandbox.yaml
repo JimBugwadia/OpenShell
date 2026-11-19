@@ -1,9 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 apiVersion: openshell.ai/v1alpha1
+kind: OpenShellSandboxTemplate
+metadata:
+  name: support-agent
+  namespace: openshell-sandbox
+spec:
+  image: registry.example.com/support-agent@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  resources:
+    cpu: "2"
+    memory: 4Gi
+---
+apiVersion: openshell.ai/v1alpha1
 kind: OpenShellSandbox
 metadata:
   name: support-agent-demo
   namespace: openshell-sandbox
 spec:
-  workloadTemplate: support-agent-v2
+  workloadTemplate: support-agent

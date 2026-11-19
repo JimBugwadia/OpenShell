@@ -8,11 +8,16 @@
 # authentication and three client identities:
 #   openshell-k8s-controller  the listed sandbox manager
 #   openshell-cli             an ordinary user
+#   agent-executor            a second manager that creates a session sandbox
+#                             per conversation, standing in for the proposed
+#                             gateway Sessions API
 #   oncall (OU=operator)      an operator, for emergency stop and delete
-# It checks that only the manager provisions, that everyone can still read,
-# that the operator can delete in an emergency, and that the gateway refuses
-# to start when the list changes while sandboxes exist. Everything, including
-# the CLI's configuration, lives in one temporary directory.
+# It checks that only managers provision, that everyone can still read,
+# that the operator can delete in an emergency, that the gateway refuses to
+# start when the list changes while sandboxes exist, and that sessions
+# created from a template family resolve to its latest revision and can't be
+# changed by the other manager. Everything, including the CLI's configuration, lives
+# in one temporary directory.
 #
 # Environment:
 #   MANAGERS_TEST_PORT   gateway port (default: 18291)
@@ -66,6 +71,7 @@ cleanup() {
   # Remove any sandbox the test created, as the manager, while the gateway runs.
   if [ -n "${gateway_pid}" ]; then
     as controller sandbox delete managed-1 >/dev/null 2>&1 || true
+    as executor sandbox delete session-1 >/dev/null 2>&1 || true
     sleep 2
   fi
   stop_gateway
@@ -166,10 +172,12 @@ XDG_CONFIG_HOME="${STATE}/certgen-config" "${GATEWAY_BIN}" generate-certs --outp
 issue_client_cert controller "/CN=openshell-k8s-controller/OU=openshell-user"
 issue_client_cert cli "/CN=openshell-cli/OU=openshell-user"
 issue_client_cert operator "/CN=oncall/OU=operator"
-write_config '["mtls:openshell-k8s-controller"]'
+issue_client_cert executor "/CN=agent-executor/OU=openshell-user"
+MANAGERS='["mtls:openshell-k8s-controller", "mtls:agent-executor"]'
+write_config "${MANAGERS}"
 sed -n '/^\[openshell.gateway\]/,/^$/p' "${STATE}/gateway.toml"
 start_gateway || fail "gateway exited during startup"
-pass "gateway listening on 127.0.0.1:${PORT}; sandbox manager: mtls:openshell-k8s-controller"
+pass "gateway listening on 127.0.0.1:${PORT}; sandbox managers: the controller and agent-executor"
 
 step "1. A user who isn't a manager can't create a sandbox"
 if output="$(as cli sandbox create --name cli-made --no-tty -- true 2>&1)"; then
@@ -206,13 +214,13 @@ done
 
 step "4. The gateway refuses to start if the managers list changes while sandboxes exist"
 stop_gateway
-write_config '["mtls:openshell-k8s-controller", "mtls:someone-else"]'
+write_config '["mtls:openshell-k8s-controller", "mtls:agent-executor", "mtls:someone-else"]'
 if start_gateway; then
   fail "the gateway started with a changed managers list"
 fi
 grep -A4 "sandbox_managers changed" "${GATEWAY_LOG}" | tr '\n' ' ' | tr -s ' │' ' ' | cut -c1-260; echo
 pass "startup refused with the changed list"
-write_config '["mtls:openshell-k8s-controller"]'
+write_config "${MANAGERS}"
 start_gateway || fail "the gateway did not restart with the original list"
 pass "the gateway starts again with the original list"
 
@@ -224,4 +232,43 @@ for _ in $(seq 1 30); do
 done
 as cli sandbox get managed-1 >/dev/null 2>&1 && fail "managed-1 still exists after the emergency delete"
 pass "operator oncall deleted managed-1"
+
+step "6. A session service creates a session from a template family"
+# The Kubernetes controller publishes each OpenShellSandboxTemplate generation
+# as an immutable revision with these labels; publish two by hand here.
+for generation in 1 2; do
+  as controller sandbox template create "agent-r${generation}" \
+    --label openshell.ai/template-family=agent \
+    --label "openshell.ai/template-generation=${generation}" >/dev/null \
+    || fail "could not publish template revision agent-r${generation}"
+done
+pass "published revisions agent-r1 and agent-r2 of template family agent"
+as executor sandbox create --name session-1 --template agent --no-tty -- sleep 600 \
+  >"${STATE}/session.log" 2>&1 &
+create_pid=$!
+for _ in $(seq 1 30); do
+  as executor sandbox get session-1 >/dev/null 2>&1 && break
+  sleep 1
+done
+as executor sandbox get session-1 >"${STATE}/session.txt" 2>&1 || fail "the session was not created"
+kill "${create_pid}" 2>/dev/null; wait "${create_pid}" 2>/dev/null || true; create_pid=
+grep -E "Workload template|sandbox-manager:" "${STATE}/session.txt" | sed 's/^ */  /'
+grep -q "agent-r2" "${STATE}/session.txt" || fail "the session did not resolve to the latest revision"
+grep -q "internal.openshell.ai/sandbox-manager: mtls:agent-executor" "${STATE}/session.txt" \
+  || fail "the session does not record agent-executor as its manager"
+pass "session-1 resolved family agent to revision agent-r2 and records agent-executor"
+if output="$(as controller sandbox delete session-1 2>&1)"; then
+  fail "the controller could delete the session service's session"
+fi
+denied "${output}" || fail "unexpected delete error: ${output}"
+pass "the controller can't delete the session service's session"
+as executor sandbox delete session-1 >/dev/null || fail "the session service could not end its session"
+for _ in $(seq 1 30); do
+  as cli sandbox get session-1 >/dev/null 2>&1 || break
+  sleep 1
+done
+for generation in 1 2; do
+  as controller sandbox template delete "agent-r${generation}" >/dev/null 2>&1 || true
+done
+pass "agent-executor ended session-1"
 completed=1
