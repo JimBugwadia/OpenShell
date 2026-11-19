@@ -255,7 +255,10 @@ async fn accepted_stopped_or_missing_sandbox_is_not_recreated() {
         .await
         .unwrap();
     assert_eq!(status.gateway_phase.as_deref(), Some("Stopped"));
-    assert_ne!(status.phase, "Ready");
+    assert_eq!(
+        (status.phase.as_str(), status.reason.as_str()),
+        ("Ready", "Provisioned")
+    );
     *gateway.current.lock().unwrap() = None;
     advance(&mut status, false, NOW + 30, &gateway, &store)
         .await
@@ -658,4 +661,38 @@ async fn inaccessible_record_during_deletion_is_never_finalized_without_a_delete
             .unwrap(),
         Outcome::Finalize
     );
+}
+
+#[tokio::test]
+async fn sleeping_and_waking_keep_health_while_errors_block() {
+    let mut status = initial();
+    status.sandbox_id = Some("gateway-id".into());
+    status.journal.create_attempts = 1;
+    let store = Store {
+        durable: Mutex::new(status.clone()),
+        fail: false,
+    };
+    let gateway = mock(&store);
+    for (phase, expected) in [
+        ("Provisioning", ("Progressing", "GatewayProgressing")),
+        ("Ready", ("Ready", "GatewayReady")),
+        ("Suspending", ("Ready", "Provisioned")),
+        ("Suspended", ("Ready", "Provisioned")),
+        ("Starting", ("Ready", "Provisioned")),
+        ("Completed", ("Ready", "Provisioned")),
+        ("Error", ("Blocked", "GatewayNotReady")),
+        ("Unknown", ("Blocked", "GatewayNotReady")),
+    ] {
+        *gateway.current.lock().unwrap() = Some(remote(&status, phase));
+        advance(&mut status, false, NOW, &gateway, &store)
+            .await
+            .unwrap();
+        assert_eq!(
+            (status.phase.as_str(), status.reason.as_str()),
+            expected,
+            "gateway phase {phase}"
+        );
+        assert_eq!(status.gateway_phase.as_deref(), Some(phase));
+    }
+    assert!(gateway.creates.lock().unwrap().is_empty());
 }

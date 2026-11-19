@@ -209,11 +209,14 @@ impl SandboxStatus {
 fn ready_message(phase: &str, reason: &str) -> &'static str {
     match reason {
         "GatewayReady" => "The gateway reports the sandbox phase as Ready.",
+        "Provisioned" => {
+            "The sandbox is provisioned; it is starting, stopped, suspended, or completed."
+        }
         "PendingSubmission" => "The controller has not submitted the sandbox to the gateway.",
         "Submitting" => "The controller is submitting the sandbox to the gateway.",
         "Accepted" => "The gateway accepted the sandbox.",
-        "GatewayProgressing" => "The gateway is provisioning or starting the sandbox.",
-        "GatewayNotReady" => "The gateway reports a sandbox phase other than Ready.",
+        "GatewayProgressing" => "The gateway is provisioning the sandbox.",
+        "GatewayNotReady" => "The gateway reports the sandbox in an error or unknown phase.",
         "CreateUncertain" => "The create result is unknown; the controller replays the request.",
         "CreateReplayExhausted" => "Create replay stopped; investigate the gateway sandbox.",
         "NameCollision" => "A gateway sandbox with this name already exists.",
@@ -527,12 +530,16 @@ pub async fn advance(
         Ok(Some(remote)) => {
             status.gateway_phase = Some(remote.phase.clone());
             // Stopped, completed, and missing records never trigger Create/Start.
-            if remote.phase == "Ready" {
-                status.report("Ready", "GatewayReady");
-            } else if matches!(remote.phase.as_str(), "Provisioning" | "Starting") {
-                status.report("Progressing", "GatewayProgressing");
-            } else {
-                status.report("Blocked", "GatewayNotReady");
+            // Status describes the declaration, not the runtime: a provisioned
+            // sandbox that is stopped, suspended, or completed stays Ready, so
+            // sleeping and waking never flip GitOps health.
+            match remote.phase.as_str() {
+                "Ready" => status.report("Ready", "GatewayReady"),
+                "Starting" | "Stopping" | "Stopped" | "Suspending" | "Suspended" | "Completed" => {
+                    status.report("Ready", "Provisioned");
+                }
+                "Provisioning" => status.report("Progressing", "GatewayProgressing"),
+                _ => status.report("Blocked", "GatewayNotReady"),
             }
         }
     }

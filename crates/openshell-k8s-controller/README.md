@@ -72,8 +72,11 @@ while operations are outstanding is unsupported.
   completion, suspension, and missing records remain observable.
 - Status exposes `phase` (`Ready`, `Progressing`, `Blocked`), a fixed safe
   `reason`, a `Ready` condition, `observedGeneration`, `sandboxName`,
-  `sandboxId`, and `gatewayPhase`. `Ready` means only that the gateway reports
-  Ready; no application health is inferred. Raw gateway errors and workload
+  `sandboxId`, and `gatewayPhase`. Status describes the declaration, not the
+  runtime: `Ready` means the gateway provisioned the sandbox, and it stays
+  `Ready` with reason `Provisioned` while the sandbox is starting, stopped,
+  suspended, or completed, so sleeping and waking never change GitOps health.
+  `gatewayPhase` shows the runtime phase. No application health is inferred. Raw gateway errors and workload
   details are not copied into status or logs. `Progressing` includes
   automatic retries such as `CreateUncertain`, `DeleteUncertain`, and
   `ObservationUnavailable`; `Blocked` means the controller needs you to act.

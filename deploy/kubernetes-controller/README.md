@@ -93,7 +93,9 @@ kubectl --context "$KUBE_CONTEXT" wait --for=condition=Ready \
 You can use the short name `ossbx` in place of `openshellsandboxes`. The list
 shows the Phase, Reason, Gateway Phase, and Age columns. The top-level status
 fields `phase`, `reason`, `conditions`, `sandboxName`, `sandboxId`, and
-`gatewayPhase` are for you. `status.journal` holds the controller's recovery
+`gatewayPhase` are for you. A provisioned sandbox stays `Ready` while it is
+stopped, suspended, or completed; the Gateway Phase column shows its runtime
+phase. `status.journal` holds the controller's recovery
 journal, including request IDs, attempt counters, and RFC 3339 retry
 timestamps; don't edit it.
 
