@@ -89,7 +89,7 @@ metadata:
   name: demo-agent
   namespace: agents
 spec:
-  image: ghcr.io/nvidia/openshell/sandbox:0.1.6
+  image: nvcr.io/nvidia/base/ubuntu:24.04
   environment:
     AGENT_RELEASE: "1"
 ---

@@ -24,7 +24,7 @@
 #   DEMO_GATEWAY_URL   Gateway URL for the controller (default: from the CLI registration)
 #   DEMO_MTLS_DIR      Directory with ca.crt, tls.crt, tls.key
 #                      (default: ~/.config/openshell/gateways/$DEMO_GATEWAY/mtls)
-#   DEMO_IMAGE         Template image (default: ghcr.io/nvidia/openshell/sandbox:0.1.6)
+#   DEMO_IMAGE         Template image (default: nvcr.io/nvidia/base/ubuntu:24.04)
 #   DEMO_PAUSE=1       Pause between steps for a live walkthrough
 #   DEMO_KEEP_CLUSTER=1  Keep the kind cluster afterward
 #   OPENSHELL_CLI      CLI binary (default: openshell)
@@ -40,7 +40,7 @@ NAMESPACE=agents
 suffix="$(printf '%04x%04x' "${RANDOM}" "${RANDOM}" | cut -c1-5)"
 WORKSPACE="crd-demo-${suffix}"
 TEMPLATE="crd-demo-agent"
-IMAGE="${DEMO_IMAGE:-ghcr.io/nvidia/openshell/sandbox:0.1.6}"
+IMAGE="${DEMO_IMAGE:-nvcr.io/nvidia/base/ubuntu:24.04}"
 KCFG="${ROOT}/target/${CLUSTER}.kubeconfig"
 CONTROLLER_LOG="${ROOT}/target/${CLUSTER}-controller.log"
 WATCH_LOG="${ROOT}/target/${CLUSTER}-watch.log"
