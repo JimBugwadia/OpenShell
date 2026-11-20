@@ -42,13 +42,12 @@ wherever the gateway runs it.
 
 ```shell
 export KUBECONFIG=$PWD/target/openshell-crd-demo.kubeconfig
-export WS=crd-demo
 MTLS=~/.config/openshell/gateways/openshell/mtls
 
 kind create cluster --name openshell-crd-demo --kubeconfig "$KUBECONFIG"
 kubectl create namespace agents
-openshell workspace create --name "$WS"
-openshell sandbox template create demo-agent --workspace "$WS"
+openshell workspace create --name crd-demo
+openshell sandbox template create demo-agent --workspace crd-demo
 ```
 
 Build the controller and install its CRDs. The controller binary prints both
@@ -112,8 +111,8 @@ assess health without custom scripts.
 
 ```shell
 NAME=$(kubectl get ossbx support-agent -n agents -o jsonpath='{.status.sandboxName}')
-openshell sandbox get "$NAME" --workspace "$WS"
-openshell sandbox exec "$NAME" --workspace "$WS" --no-tty -- echo "hello from a CRD-managed sandbox"
+openshell sandbox get "$NAME" --workspace crd-demo
+openshell sandbox exec "$NAME" --workspace crd-demo --no-tty -- echo "hello from a CRD-managed sandbox"
 ```
 
 Point out: the gateway record carries `kubernetes.openshell.ai/namespace`,
@@ -179,7 +178,7 @@ script checks this by watching the resource for 45 seconds.
 ```shell
 kubectl get ossbx support-agent -n agents -o jsonpath='{.metadata.finalizers}{"\n"}'
 kubectl delete ossbx support-agent -n agents
-openshell sandbox get "$NAME" --workspace "$WS"
+openshell sandbox get "$NAME" --workspace crd-demo
 ```
 
 Expected: the delete waits for the gateway to remove the sandbox, and the last
@@ -223,8 +222,8 @@ both resources when you're done.
 Stop the controller, then:
 
 ```shell
-openshell sandbox template delete demo-agent --workspace "$WS"
-openshell workspace delete "$WS"
+openshell sandbox template delete demo-agent --workspace crd-demo
+openshell workspace delete crd-demo
 kind delete cluster --name openshell-crd-demo --kubeconfig "$KUBECONFIG"
 ```
 
