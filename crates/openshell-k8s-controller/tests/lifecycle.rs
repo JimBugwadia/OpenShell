@@ -708,17 +708,6 @@ fn template_revisions_are_named_by_generation_within_the_gateway_limit() {
 }
 
 #[test]
-fn template_revision_request_ids_are_stable_and_distinct() {
-    use openshell_k8s_controller::template::revision_request_id;
-    let uid = "fd229996-bc63-413e-9dc0-cc5f05abe5bd";
-    let first = revision_request_id(uid, 1).unwrap();
-    assert_eq!(first, revision_request_id(uid, 1).unwrap());
-    assert_ne!(first, revision_request_id(uid, 2).unwrap());
-    assert_ne!(first, uid);
-    assert!(revision_request_id("not-a-uuid", 1).is_err());
-}
-
-#[test]
 fn template_status_reports_only_the_published_generation_as_ready() {
     use openshell_k8s_controller::template::{TemplateStatus, apply_publish};
     let mut status = TemplateStatus::default();

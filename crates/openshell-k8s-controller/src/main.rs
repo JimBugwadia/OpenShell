@@ -21,7 +21,7 @@ use openshell_k8s_controller::{
     sync_conditions,
     template::{
         FAMILY_LABEL, GENERATION_LABEL, OpenShellSandboxTemplate, Revision, SOURCE_UID_LABEL,
-        TemplateGateway, apply_publish, revision_name, revision_request_id,
+        TemplateGateway, apply_publish, revision_name,
     },
 };
 use openshell_sdk::{
@@ -208,7 +208,7 @@ fn template_request(revision: &Revision) -> CreateSandboxTemplateRequest {
     let resources = revision.spec.resources.clone().unwrap_or_default();
     CreateSandboxTemplateRequest {
         workspace_scope: Some(proto::workspace_selector(&revision.workspace)),
-        request_id: revision.request_id.clone(),
+        request_id: String::new(),
         template: Some(SandboxWorkloadTemplate {
             metadata: Some(ObjectMeta {
                 name: revision.name.clone(),
@@ -593,7 +593,6 @@ async fn reconcile_template(
                 family: name.clone(),
                 generation,
                 source_uid: uid.clone(),
-                request_id: revision_request_id(&uid, generation).map_err(|_| Error::Identity)?,
                 spec: object.spec.clone(),
             })
             .await;

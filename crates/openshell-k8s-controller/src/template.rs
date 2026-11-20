@@ -133,24 +133,12 @@ pub fn revision_name(name: &str, generation: i64) -> Option<String> {
     (revision.len() <= MAX_REVISION_NAME).then_some(revision)
 }
 
-/// Deterministic request ID for publishing one generation, so a lost response
-/// replays the same gateway admission instead of creating a second revision.
-///
-/// # Errors
-///
-/// Returns an error when `uid` is not a UUID.
-pub fn revision_request_id(uid: &str, generation: i64) -> Result<String, uuid::Error> {
-    // Identity bookkeeping, not a cryptographic operation; no hashing or secrets.
-    let mut bytes = *uuid::Uuid::parse_str(uid)?.as_bytes();
-    for (byte, mix) in bytes[8..].iter_mut().zip(generation.to_be_bytes()) {
-        *byte ^= mix;
-    }
-    // Keep revision IDs distinct from IDs derived from the resource UID alone.
-    bytes[0] ^= 0x80;
-    Ok(uuid::Uuid::from_bytes(bytes).to_string())
-}
-
 /// One immutable gateway template to publish.
+///
+/// Its name is deterministic and unique in the workspace, so a retry after a lost response finds the revision
+/// it already created by name and owner label, without a request ID. A request
+/// ID would be worse: the gateway never replays one whose first attempt failed,
+/// so a transient collision would block the template permanently.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Revision {
     pub workspace: String,
@@ -158,7 +146,6 @@ pub struct Revision {
     pub family: String,
     pub generation: i64,
     pub source_uid: String,
-    pub request_id: String,
     pub spec: TemplateSpec,
 }
 
