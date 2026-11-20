@@ -25,7 +25,12 @@ You need:
 - For Part 2, port 18291 free and the OpenShell 0.1.6 supervisor and sandbox
   images available to Docker.
 
-Run the commands from the repository root.
+Run every command from the root of your OpenShell checkout. The build output
+and the demo kubeconfig both go in its `target` directory:
+
+```shell
+cd ~/src/OpenShell   # replace with the path to your checkout
+```
 
 ## Part 1: manage a sandbox from Kubernetes
 
@@ -44,16 +49,32 @@ kind create cluster --name openshell-crd-demo --kubeconfig "$KUBECONFIG"
 kubectl create namespace agents
 openshell workspace create --name "$WS"
 openshell sandbox template create demo-agent --workspace "$WS"
-
-cargo build -p openshell-k8s-controller
-target/debug/openshell-k8s-controller --print-crd | kubectl apply -f -
-kubectl wait --for=condition=Established crd/openshellsandboxes.openshell.ai
 ```
 
-In a second terminal, start the controller. One controller binds one
-namespace to one gateway workspace:
+Build the controller and install its CRDs. The controller binary prints both
+CRDs, `OpenShellSandbox` and `OpenShellSandboxTemplate`, so the installed
+schema always matches the controller you run:
 
 ```shell
+cargo build -p openshell-k8s-controller
+target/debug/openshell-k8s-controller --print-crd | kubectl apply -f -
+kubectl wait --for=condition=Established \
+  crd/openshellsandboxes.openshell.ai crd/openshellsandboxtemplates.openshell.ai
+kubectl get crd | grep openshell.ai
+```
+
+The last command lists both CRDs:
+
+```text
+openshellsandboxes.openshell.ai          2026-11-19T00:00:00Z
+openshellsandboxtemplates.openshell.ai   2026-11-19T00:00:00Z
+```
+
+In a second terminal, change to the same checkout and start the controller.
+One controller binds one namespace to one gateway workspace:
+
+```shell
+cd ~/src/OpenShell   # replace with the path to your checkout
 export KUBECONFIG=$PWD/target/openshell-crd-demo.kubeconfig
 MTLS=~/.config/openshell/gateways/openshell/mtls
 target/debug/openshell-k8s-controller \
