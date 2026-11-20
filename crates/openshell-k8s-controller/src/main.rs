@@ -644,9 +644,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.print_crd {
         let documents = crds()?
             .iter()
-            .map(serde_yml::to_string)
+            .map(|crd| serde_yml::to_string(crd).map(|yaml| yaml.trim_end().to_owned()))
             .collect::<Result<Vec<_>, _>>()?;
-        print!("{}", documents.join("---\n"));
+        println!("{}", documents.join("\n---\n"));
         return Ok(());
     }
     let namespace = args.namespace.ok_or("--namespace is required")?;
