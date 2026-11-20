@@ -1,4 +1,4 @@
-# Demo: declarative OpenShell sandboxes on Kubernetes
+# Kubernetes Sandbox CRD
 
 This walkthrough shows the experimental `OpenShellSandbox` controller and the
 gateway's sandbox manager setting. It takes about 15 minutes. Part 1 runs the

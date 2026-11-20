@@ -7,6 +7,9 @@ Deployment or container image because this prototype does not publish a
 controller image. Install its CRD from the executable so the served schema and
 the controller stay in sync; `--print-crd` prints both CRDs.
 
+For a step-by-step walkthrough on a local kind cluster, see the
+[Kubernetes sandbox CRD example](../../examples/kubernetes-sandbox-crd/README.md).
+
 ## Requirements
 
 - A Kubernetes cluster and `kubectl` context that you intend to use.

@@ -3,7 +3,8 @@
 This optional, single-replica controller translates namespaced
 `openshell.ai/v1alpha1` `OpenShellSandbox` resources into existing gateway gRPC
 create, observe, and delete calls. The gateway remains the lifecycle owner.
-It does not provision Kubernetes workloads directly.
+It does not provision Kubernetes workloads directly. For a walkthrough, see the
+[Kubernetes sandbox CRD example](../../examples/kubernetes-sandbox-crd/README.md).
 
 ```shell
 cargo run -p openshell-k8s-controller -- --print-crd
