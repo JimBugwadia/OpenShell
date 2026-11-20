@@ -4,15 +4,19 @@
 #
 # End-to-end demo and test of the experimental OpenShellSandbox controller.
 #
-# Creates a throwaway kind cluster for the CRD, plus a dedicated workspace and
-# workload template on an existing gateway, then walks through:
-#   1. Create a sandbox from a custom resource and wait for the Ready condition,
-#      then measure its etcd size and confirm a Ready sandbox causes no writes.
+# Creates a throwaway kind cluster for the CRDs, plus a dedicated workspace on
+# an existing gateway, then walks through:
+#   1. Declare a template and a sandbox that uses it, and wait for both to be
+#      Ready, then measure the sandbox's etcd size and confirm a Ready sandbox
+#      causes no writes.
 #   2. Show the same sandbox through the gateway CLI and run a command in it.
 #   3. Reject a workload change (the workload template is immutable).
-#   4. Restart the controller and confirm it doesn't create a duplicate.
-#   5. Request a missing template: blocked with CreateRejected, deletes cleanly.
-#   6. Delete the resource and confirm the gateway sandbox is gone.
+#   4. Change the template: it publishes a new revision, and the running
+#      sandbox stays on the revision it started with.
+#   5. Restart the controller and confirm it doesn't create a duplicate.
+#   6. Request a missing template: blocked with CreateRejected, deletes cleanly.
+#   7. Delete the sandbox and the template, and confirm the gateway removes the
+#      sandbox and every template revision.
 # The script deletes only what it created and exits nonzero on any failed check.
 #
 # Environment:
@@ -20,7 +24,7 @@
 #   DEMO_GATEWAY_URL   Gateway URL for the controller (default: from the CLI registration)
 #   DEMO_MTLS_DIR      Directory with ca.crt, tls.crt, tls.key
 #                      (default: ~/.config/openshell/gateways/$DEMO_GATEWAY/mtls)
-#   DEMO_IMAGE         Workload image (default: the gateway's default sandbox image)
+#   DEMO_IMAGE         Template image (default: ghcr.io/nvidia/openshell/sandbox:0.1.6)
 #   DEMO_PAUSE=1       Pause between steps for a live walkthrough
 #   DEMO_KEEP_CLUSTER=1  Keep the kind cluster afterward
 #   OPENSHELL_CLI      CLI binary (default: openshell)
@@ -36,6 +40,7 @@ NAMESPACE=agents
 suffix="$(printf '%04x%04x' "${RANDOM}" "${RANDOM}" | cut -c1-5)"
 WORKSPACE="crd-demo-${suffix}"
 TEMPLATE="crd-demo-agent"
+IMAGE="${DEMO_IMAGE:-ghcr.io/nvidia/openshell/sandbox:0.1.6}"
 KCFG="${ROOT}/target/${CLUSTER}.kubeconfig"
 CONTROLLER_LOG="${ROOT}/target/${CLUSTER}-controller.log"
 WATCH_LOG="${ROOT}/target/${CLUSTER}-watch.log"
@@ -53,6 +58,8 @@ pause() { if [ "${DEMO_PAUSE:-0}" = "1" ]; then read -r -p "   [Enter to continu
 kctl() { kubectl --kubeconfig "${KCFG}" "$@"; }
 os() { "${CLI}" -g "${GW}" "$@"; }
 jp() { kctl get openshellsandbox "$1" -n "${NAMESPACE}" -o "jsonpath=$2"; }
+tp() { kctl get openshellsandboxtemplate "$1" -n "${NAMESPACE}" -o "jsonpath=$2"; }
+revisions() { os sandbox template list --workspace "${WORKSPACE}" 2>/dev/null | awk 'NR > 1 {print $1}' | grep -c "^${TEMPLATE}-r" || true; }
 
 for command in cargo kind kubectl docker "${CLI}"; do
   command -v "${command}" >/dev/null 2>&1 || fail "required command not found: ${command}"
@@ -69,8 +76,8 @@ fi
 [ -e "${KCFG}" ] && fail "refusing to overwrite ${KCFG}"
 mkdir -p "${ROOT}/target"
 
-created_cluster=0 created_workspace=0 created_template=0 controller_pid= watch_pid=
-resources=() sandbox_names=()
+created_cluster=0 created_workspace=0 controller_pid= watch_pid=
+resources=() templates=() sandbox_names=()
 
 stop_controller() {
   if [ -n "${controller_pid}" ]; then
@@ -101,6 +108,14 @@ cleanup() {
         || echo "WARNING: finalizer cleanup for ${resource} did not finish." >&2
     fi
   done
+  # Delete templates after sandboxes, so the controller removes their revisions last.
+  for template in "${templates[@]+"${templates[@]}"}"; do
+    if kctl get openshellsandboxtemplate "${template}" -n "${NAMESPACE}" >/dev/null 2>&1; then
+      [ -n "${controller_pid}" ] || start_controller || true
+      kctl delete openshellsandboxtemplate "${template}" -n "${NAMESPACE}" --timeout=120s >/dev/null 2>&1 \
+        || echo "WARNING: finalizer cleanup for template ${template} did not finish." >&2
+    fi
+  done
   stop_controller
   [ -n "${watch_pid}" ] && kill "${watch_pid}" 2>/dev/null
   rm -f "${WATCH_LOG}"
@@ -111,7 +126,6 @@ cleanup() {
       os sandbox delete "${name}" --workspace "${WORKSPACE}" >/dev/null 2>&1 || result=1
     fi
   done
-  [ "${created_template}" = "1" ] && { os sandbox template delete "${TEMPLATE}" --workspace "${WORKSPACE}" >/dev/null 2>&1 || true; }
   [ "${created_workspace}" = "1" ] && { os workspace delete "${WORKSPACE}" >/dev/null 2>&1 \
     || echo "WARNING: could not delete workspace ${WORKSPACE}." >&2; }
   if [ "${created_cluster}" = "1" ]; then
@@ -135,28 +149,25 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ---------------------------------------------------------------------------
-step "Set up: kind cluster, dedicated gateway workspace, and workload template"
+step "Set up: kind cluster and a dedicated gateway workspace"
 echo "Gateway ${GW} at ${GATEWAY_URL}; workspace ${WORKSPACE}"
 created_cluster=1
 run kind create cluster --name "${CLUSTER}" --kubeconfig "${KCFG}" --wait 120s >/dev/null
 kctl create namespace "${NAMESPACE}" >/dev/null
 created_workspace=1
 run os workspace create --name "${WORKSPACE}" >/dev/null
-created_template=1
-template_args=()
-[ -n "${DEMO_IMAGE:-}" ] && template_args=(--image "${DEMO_IMAGE}")
-run os sandbox template create "${TEMPLATE}" --workspace "${WORKSPACE}" \
-  "${template_args[@]+"${template_args[@]}"}" >/dev/null
 run cargo build --locked -q -p openshell-k8s-controller --manifest-path "${ROOT}/Cargo.toml"
 
-step "Install the CRD generated by the controller binary"
+step "Install the CRDs generated by the controller binary"
 "${CONTROLLER}" --print-crd | kctl apply -f - >/dev/null
-run kctl wait --for=condition=Established --timeout=60s crd/openshellsandboxes.openshell.ai
+run kctl wait --for=condition=Established --timeout=60s \
+  crd/openshellsandboxes.openshell.ai crd/openshellsandboxtemplates.openshell.ai
 start_controller
 pass "controller running (pid ${controller_pid}), bound to ${NAMESPACE} -> ${WORKSPACE}"
 
 # ---------------------------------------------------------------------------
-step "1. Declare a sandbox as a Kubernetes resource"
+step "1. Declare a template and a sandbox that uses it"
+templates+=("${TEMPLATE}")
 resources+=(support-agent)
 # Record every change to the resource, to count the writes it causes.
 kctl get ossbx -n "${NAMESPACE}" --watch-only --no-headers \
@@ -165,6 +176,16 @@ watch_pid=$!
 sleep 1
 cat <<EOF | tee /dev/stderr | kctl apply -f - >/dev/null
 apiVersion: openshell.ai/v1alpha1
+kind: OpenShellSandboxTemplate
+metadata:
+  name: ${TEMPLATE}
+  namespace: ${NAMESPACE}
+spec:
+  image: ${IMAGE}
+  environment:
+    AGENT_RELEASE: "1"
+---
+apiVersion: openshell.ai/v1alpha1
 kind: OpenShellSandbox
 metadata:
   name: support-agent
@@ -172,14 +193,19 @@ metadata:
 spec:
   workloadTemplate: ${TEMPLATE}
 EOF
+run kctl wait --for=condition=Ready --timeout=60s "ossbxt/${TEMPLATE}" -n "${NAMESPACE}"
 run kctl wait --for=condition=Ready "--timeout=${TIMEOUT}s" ossbx/support-agent -n "${NAMESPACE}"
-run kctl get ossbx -n "${NAMESPACE}"
+run kctl get ossbxt,ossbx -n "${NAMESPACE}"
 sandbox="$(jp support-agent '{.status.sandboxName}')"
 sandbox_id="$(jp support-agent '{.status.sandboxId}')"
 sandbox_names+=("${sandbox}")
 echo "Ready condition: $(jp support-agent '{.status.conditions[?(@.type=="Ready")].message}')"
 [ -n "${sandbox_id}" ] || fail "status has no gateway sandbox ID"
-pass "gateway sandbox ${sandbox} (${sandbox_id}) is Ready"
+[ "$(tp "${TEMPLATE}" '{.status.currentRevision}')" = "${TEMPLATE}-r1" ] \
+  || fail "template did not publish revision ${TEMPLATE}-r1"
+[ "$(jp support-agent '{.status.templateRevision}')" = "${TEMPLATE}-r1" ] \
+  || fail "sandbox is not pinned to ${TEMPLATE}-r1"
+pass "template published ${TEMPLATE}-r1; gateway sandbox ${sandbox} (${sandbox_id}) uses it and is Ready"
 
 step "Scale check: etcd footprint and write count for one sandbox"
 writes() { grep -c '^support-agent ' "${WATCH_LOG}" || true; }
@@ -215,7 +241,19 @@ if kctl patch ossbx support-agent -n "${NAMESPACE}" --type=merge \
 fi
 pass "workload change rejected; create a new resource to run a different workload"
 
-step "4. Restart the controller; it resumes from the status journal without duplicating work"
+step "4. Change the template; running sandboxes keep their revision"
+run kctl patch ossbxt "${TEMPLATE}" -n "${NAMESPACE}" --type=merge \
+  -p '{"spec":{"environment":{"AGENT_RELEASE":"2"}}}'
+run kctl wait --for=jsonpath='{.status.currentRevision}'="${TEMPLATE}-r2" --timeout=60s \
+  "ossbxt/${TEMPLATE}" -n "${NAMESPACE}"
+run os sandbox template list --workspace "${WORKSPACE}"
+[ "$(revisions)" -eq 2 ] || fail "gateway does not list both template revisions"
+[ "$(jp support-agent '{.status.templateRevision}')" = "${TEMPLATE}-r1" ] \
+  || fail "running sandbox moved off ${TEMPLATE}-r1"
+[ "$(jp support-agent '{.status.sandboxId}')" = "${sandbox_id}" ] || fail "sandbox was replaced"
+pass "template published ${TEMPLATE}-r2; support-agent still runs ${TEMPLATE}-r1"
+
+step "5. Restart the controller; it resumes from the status journal without duplicating work"
 attempts_before="$(jp support-agent '{.status.journal.createAttempts}')"
 stop_controller
 start_controller
@@ -227,7 +265,7 @@ sleep 5
   || fail "Ready condition lost after restart"
 pass "same sandbox ID, ${attempts_before} create attempt(s), still Ready"
 
-step "5. A missing template is rejected, and the resource still deletes cleanly"
+step "6. A missing template is rejected, and the resource still deletes cleanly"
 resources+=(missing-template)
 cat <<EOF | tee /dev/stderr | kctl apply -f - >/dev/null
 apiVersion: openshell.ai/v1alpha1
@@ -248,10 +286,13 @@ run kctl get ossbx -n "${NAMESPACE}"
 run kctl delete ossbx missing-template -n "${NAMESPACE}" --timeout=60s
 pass "rejected resource deleted without manual finalizer removal"
 
-step "6. Delete the resource; the finalizer waits until the gateway sandbox is gone"
+step "7. Delete the sandbox and the template; the finalizers wait for the gateway"
 echo "Finalizers: $(jp support-agent '{.metadata.finalizers}')"
 run kctl delete ossbx support-agent -n "${NAMESPACE}" "--timeout=${TIMEOUT}s"
 if os sandbox get "${sandbox}" --workspace "${WORKSPACE}" >/dev/null 2>&1; then
   fail "gateway sandbox ${sandbox} still exists after finalizer removal"
 fi
 pass "gateway sandbox ${sandbox} removed before the resource was released"
+run kctl delete ossbxt "${TEMPLATE}" -n "${NAMESPACE}" --timeout=120s
+[ "$(revisions)" -eq 0 ] || fail "template revisions remain in the gateway"
+pass "template ${TEMPLATE} and its gateway revisions removed"

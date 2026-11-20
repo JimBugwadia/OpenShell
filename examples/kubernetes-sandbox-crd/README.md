@@ -1,7 +1,7 @@
 # Kubernetes Sandbox CRD
 
-This walkthrough shows the experimental `OpenShellSandbox` controller and the
-gateway's sandbox manager setting. It takes about 15 minutes. Part 1 runs the
+This walkthrough shows the experimental `OpenShellSandboxTemplate` and
+`OpenShellSandbox` controller and the gateway's sandbox manager setting. It takes about 15 minutes. Part 1 runs the
 controller against an existing local gateway; Part 2 runs a gateway built from
 this checkout to show which identities can change sandboxes.
 
@@ -36,8 +36,8 @@ cd ~/src/OpenShell   # replace with the path to your checkout
 
 ### Step 0: set up
 
-Create a throwaway cluster for the CRD, plus a dedicated gateway workspace and
-workload template. The cluster only stores the declaration; the sandbox runs
+Create a throwaway cluster for the CRDs, plus a dedicated gateway workspace.
+The cluster only stores the declaration; the sandbox runs
 wherever the gateway runs it.
 
 ```shell
@@ -47,7 +47,6 @@ MTLS=~/.config/openshell/gateways/openshell/mtls
 kind create cluster --name openshell-crd-demo --kubeconfig "$KUBECONFIG"
 kubectl create namespace agents
 openshell workspace create --name crd-demo
-openshell sandbox template create demo-agent --workspace crd-demo
 ```
 
 Build the controller and install its CRDs. The controller binary prints both
@@ -81,10 +80,23 @@ target/debug/openshell-k8s-controller \
   --tls-ca "$MTLS/ca.crt" --tls-cert "$MTLS/tls.crt" --tls-key "$MTLS/tls.key"
 ```
 
-### Step 1: declare a sandbox
+### Step 1: declare a template and a sandbox
+
+The template holds the reviewed workload: its image and settings. The sandbox
+names the template. Both live in Git in a real deployment.
 
 ```shell
 cat <<EOF | kubectl apply -f -
+apiVersion: openshell.ai/v1alpha1
+kind: OpenShellSandboxTemplate
+metadata:
+  name: demo-agent
+  namespace: agents
+spec:
+  image: ghcr.io/nvidia/openshell/sandbox:0.1.6
+  environment:
+    AGENT_RELEASE: "1"
+---
 apiVersion: openshell.ai/v1alpha1
 kind: OpenShellSandbox
 metadata:
@@ -93,16 +105,23 @@ metadata:
 spec:
   workloadTemplate: demo-agent
 EOF
+kubectl wait --for=condition=Ready ossbxt/demo-agent -n agents --timeout=60s
 kubectl wait --for=condition=Ready ossbx/support-agent -n agents --timeout=300s
-kubectl get ossbx -n agents
+kubectl get ossbxt,ossbx -n agents
 ```
 
 Expected:
 
 ```text
-NAME            PHASE   REASON         GATEWAY PHASE   AGE
-support-agent   Ready   GatewayReady   Ready           30s
+NAME                                                  PHASE   REASON      REVISION        AGE
+openshellsandboxtemplate.openshell.ai/demo-agent      Ready   Published   demo-agent-r1   30s
+
+NAME                                          PHASE   REASON         GATEWAY PHASE   AGE
+openshellsandbox.openshell.ai/support-agent   Ready   GatewayReady   Ready           30s
 ```
+
+The controller publishes the template to the gateway as revision
+`demo-agent-r1`, and the sandbox records it in `status.templateRevision`.
 
 Point out: `kubectl wait --for=condition=Ready` works, so Argo CD and Flux can
 assess health without custom scripts.
@@ -131,7 +150,23 @@ to run a different workload. The prototype makes the whole spec immutable;
 later versions can allow in-place changes to other fields, such as policy and
 providers, while the workload stays immutable.
 
-### Step 4: restart the controller
+### Step 4: change the template
+
+```shell
+kubectl patch ossbxt demo-agent -n agents --type=merge \
+  -p '{"spec":{"environment":{"AGENT_RELEASE":"2"}}}'
+kubectl wait --for=jsonpath='{.status.currentRevision}'=demo-agent-r2 \
+  ossbxt/demo-agent -n agents --timeout=60s
+openshell sandbox template list --workspace crd-demo
+kubectl get ossbx support-agent -n agents -o jsonpath='{.status.templateRevision}{"\n"}'
+```
+
+Expected: the gateway lists `demo-agent-r1` and `demo-agent-r2`, and
+`support-agent` still reports `demo-agent-r1`. Gateway templates can't change in
+place, so each template change publishes a new revision. New sandboxes get the
+latest revision; running sandboxes keep the one they started with.
+
+### Step 5: restart the controller
 
 Stop the controller with Ctrl+C and start it again, then:
 
@@ -143,7 +178,7 @@ kubectl get ossbx support-agent -n agents \
 Expected: the same sandbox ID and `attempts=1`. The controller resumes from the
 journal in status and replays nothing that already succeeded.
 
-### Step 5: request a template that doesn't exist
+### Step 6: request a template that doesn't exist
 
 ```shell
 cat <<EOF | kubectl apply -f -
@@ -163,7 +198,7 @@ kubectl delete ossbx missing-template -n agents
 Expected: `Blocked` with reason `CreateRejected`, and the delete completes
 without removing the finalizer by hand, because no gateway record can exist.
 
-### Step 6: measure the etcd footprint
+### Step 7: measure the etcd footprint
 
 ```shell
 kubectl -n kube-system exec etcd-openshell-crd-demo-control-plane -- etcdctl \
@@ -175,56 +210,26 @@ kubectl -n kube-system exec etcd-openshell-crd-demo-control-plane -- etcdctl \
 Expected: about 2,800 bytes. A Ready sandbox causes no further writes; the
 script checks this by watching the resource for 45 seconds.
 
-### Step 7: delete it
+### Step 8: delete the sandbox and the template
 
 ```shell
 kubectl get ossbx support-agent -n agents -o jsonpath='{.metadata.finalizers}{"\n"}'
 kubectl delete ossbx support-agent -n agents
 openshell sandbox get "$NAME" --workspace crd-demo
+kubectl delete ossbxt demo-agent -n agents
+openshell sandbox template list --workspace crd-demo
 ```
 
-Expected: the delete waits for the gateway to remove the sandbox, and the last
-command reports that the sandbox isn't found.
-
-### Step 8 (optional): declare the template in Kubernetes
-
-The script doesn't run this step yet. It needs a controller identity that is a
-workspace admin, because the controller publishes gateway templates.
-
-```shell
-cat <<EOF | kubectl apply -f -
-apiVersion: openshell.ai/v1alpha1
-kind: OpenShellSandboxTemplate
-metadata:
-  name: demo-agent-k8s
-  namespace: agents
-spec:
-  image: ghcr.io/nvidia/openshell/sandbox:0.1.6
----
-apiVersion: openshell.ai/v1alpha1
-kind: OpenShellSandbox
-metadata:
-  name: templated-agent
-  namespace: agents
-spec:
-  workloadTemplate: demo-agent-k8s
-EOF
-kubectl wait --for=condition=Ready ossbxt/demo-agent-k8s -n agents --timeout=60s
-kubectl get ossbxt -n agents
-kubectl get ossbx templated-agent -n agents -o jsonpath='{.status.templateRevision}{"\n"}'
-```
-
-Expected: the template shows revision `demo-agent-k8s-r1`, and the sandbox
-records the same revision. Change the template's image and apply it again: the
-template publishes `demo-agent-k8s-r2`, and `templated-agent` keeps `r1`. Delete
-both resources when you're done.
+Expected: the sandbox delete waits for the gateway to remove the sandbox, so
+`openshell sandbox get` reports that it isn't found. Deleting the template
+removes both of its gateway revisions, so the last command lists no
+`demo-agent` revisions. Delete the template after its sandboxes.
 
 ### Clean up
 
 Stop the controller, then:
 
 ```shell
-openshell sandbox template delete demo-agent --workspace crd-demo
 openshell workspace delete crd-demo
 kind delete cluster --name openshell-crd-demo --kubeconfig "$KUBECONFIG"
 ```
