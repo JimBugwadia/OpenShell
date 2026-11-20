@@ -43,7 +43,7 @@ MTLS=~/.config/openshell/gateways/openshell/mtls
 
 kind create cluster --name openshell-crd-demo --kubeconfig "$KUBECONFIG"
 kubectl create namespace agents
-openshell workspace create --name crd-demo
+openshell workspace create --name agents
 ```
 
 Build the controller and install its CRDs. The controller binary prints both
@@ -66,13 +66,17 @@ openshellsandboxtemplates.openshell.ai   2026-11-19T00:00:00Z
 ```
 
 In a second terminal, from the same checkout, start the controller.
-One controller binds one namespace to one gateway workspace:
+One controller binds one namespace to one gateway workspace. The demo gives
+both the same name, `agents`, but the controller never derives one from the
+other: the administrator who starts the controller sets the binding with
+`--namespace` and `--workspace`, so creating a namespace can't select a
+gateway workspace.
 
 ```shell
 export KUBECONFIG=$PWD/target/openshell-crd-demo.kubeconfig
 MTLS=~/.config/openshell/gateways/openshell/mtls
 target/debug/openshell-k8s-controller \
-  --namespace agents --workspace crd-demo --gateway https://localhost:17670 \
+  --namespace agents --workspace agents --gateway https://localhost:17670 \
   --tls-ca "$MTLS/ca.crt" --tls-cert "$MTLS/tls.crt" --tls-key "$MTLS/tls.key"
 ```
 
@@ -130,8 +134,8 @@ assess health without custom scripts.
 
 ```shell
 NAME=$(kubectl get ossbx support-agent -n agents -o jsonpath='{.status.sandboxName}')
-openshell sandbox get "$NAME" --workspace crd-demo
-openshell sandbox exec "$NAME" --workspace crd-demo --no-tty -- echo "hello from a CRD-managed sandbox"
+openshell sandbox get "$NAME" --workspace agents
+openshell sandbox exec "$NAME" --workspace agents --no-tty -- echo "hello from a CRD-managed sandbox"
 ```
 
 Point out: the gateway record carries `kubernetes.openshell.ai/namespace`,
@@ -157,7 +161,7 @@ kubectl patch ossbxt demo-agent -n agents --type=merge \
   -p '{"spec":{"environment":{"AGENT_RELEASE":"2"}}}'
 kubectl wait --for=jsonpath='{.status.currentRevision}'=demo-agent-r2 \
   ossbxt/demo-agent -n agents --timeout=60s
-openshell sandbox template list --workspace crd-demo
+openshell sandbox template list --workspace agents
 kubectl get ossbx support-agent -n agents -o jsonpath='{.status.templateRevision}{"\n"}'
 ```
 
@@ -215,9 +219,9 @@ script checks this by watching the resource for 45 seconds.
 ```shell
 kubectl get ossbx support-agent -n agents -o jsonpath='{.metadata.finalizers}{"\n"}'
 kubectl delete ossbx support-agent -n agents
-openshell sandbox get "$NAME" --workspace crd-demo
+openshell sandbox get "$NAME" --workspace agents
 kubectl delete ossbxt demo-agent -n agents
-openshell sandbox template list --workspace crd-demo
+openshell sandbox template list --workspace agents
 ```
 
 Expected: the sandbox delete waits for the gateway to remove the sandbox, so
@@ -230,7 +234,7 @@ removes both of its gateway revisions, so the last command lists no
 Stop the controller, then:
 
 ```shell
-openshell workspace delete crd-demo
+openshell workspace delete agents
 kind delete cluster --name openshell-crd-demo --kubeconfig "$KUBECONFIG"
 ```
 
