@@ -112,9 +112,13 @@ Expected:
 NAME                                                  PHASE   REASON      REVISION        AGE
 openshellsandboxtemplate.openshell.ai/demo-agent      Ready   Published   demo-agent-r1   30s
 
-NAME                                          PHASE   REASON         GATEWAY PHASE   AGE
-openshellsandbox.openshell.ai/support-agent   Ready   GatewayReady   Ready           30s
+NAME                                          SANDBOX               PHASE   REASON         GATEWAY PHASE   AGE
+openshellsandbox.openshell.ai/support-agent   os-5b395f76bad54509   Ready   GatewayReady   Ready           30s
 ```
+
+The `SANDBOX` column is the sandbox's name in the gateway, so you can pass it to
+`openshell sandbox` commands. Add `-o wide` to also show the template revision
+and the gateway sandbox ID.
 
 The controller publishes the template to the gateway as revision
 `demo-agent-r1`, and the sandbox records it in `status.templateRevision`.

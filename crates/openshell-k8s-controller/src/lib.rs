@@ -55,9 +55,12 @@ pub fn next_observation(status: &SandboxStatus, now: i64, deleting: bool) -> i64
     shortname = "ossbx",
     namespaced,
     status = "SandboxStatus",
+    printcolumn = r#"{"name":"Sandbox","type":"string","jsonPath":".status.sandboxName"}"#,
     printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"Reason","type":"string","jsonPath":".status.reason"}"#,
     printcolumn = r#"{"name":"Gateway Phase","type":"string","jsonPath":".status.gatewayPhase"}"#,
+    printcolumn = r#"{"name":"Template Revision","type":"string","priority":1,"jsonPath":".status.templateRevision"}"#,
+    printcolumn = r#"{"name":"Sandbox ID","type":"string","priority":1,"jsonPath":".status.sandboxId"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
