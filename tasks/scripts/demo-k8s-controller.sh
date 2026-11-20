@@ -9,7 +9,7 @@
 #   1. Create a sandbox from a custom resource and wait for the Ready condition,
 #      then measure its etcd size and confirm a Ready sandbox causes no writes.
 #   2. Show the same sandbox through the gateway CLI and run a command in it.
-#   3. Reject a spec edit (the spec is immutable).
+#   3. Reject a workload change (the workload template is immutable).
 #   4. Restart the controller and confirm it doesn't create a duplicate.
 #   5. Request a missing template: blocked with CreateRejected, deletes cleanly.
 #   6. Delete the resource and confirm the gateway sandbox is gone.
@@ -208,12 +208,12 @@ echo "${output}"
 grep -q "hello from a CRD-managed sandbox" <<<"${output}" || fail "exec output missing"
 pass "command ran inside the sandbox"
 
-step "3. The spec is immutable; edits are rejected at admission"
+step "3. The workload template is immutable; changes are rejected at admission"
 if kctl patch ossbx support-agent -n "${NAMESPACE}" --type=merge \
   -p '{"spec":{"workloadTemplate":"something-else"}}' 2>&1; then
-  fail "API server accepted a spec change"
+  fail "API server accepted a workload template change"
 fi
-pass "spec change rejected; create a new resource to change the workload"
+pass "workload change rejected; create a new resource to run a different workload"
 
 step "4. Restart the controller; it resumes from the status journal without duplicating work"
 attempts_before="$(jp support-agent '{.status.journal.createAttempts}')"

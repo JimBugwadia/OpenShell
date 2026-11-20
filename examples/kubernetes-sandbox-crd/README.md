@@ -118,16 +118,18 @@ openshell sandbox exec "$NAME" --workspace crd-demo --no-tty -- echo "hello from
 Point out: the gateway record carries `kubernetes.openshell.ai/namespace`,
 `name`, and `uid` annotations that point back to the resource.
 
-### Step 3: try to edit the spec
+### Step 3: try to change the workload
 
 ```shell
 kubectl patch ossbx support-agent -n agents --type=merge \
   -p '{"spec":{"workloadTemplate":"something-else"}}'
 ```
 
-Expected: `spec is immutable; create a new Sandbox for a different workload`.
-This is a prototype simplification; the first release plans in-place changes
-for policy, providers, and stop or start.
+Expected: the API server rejects the change with an `immutable` error. The
+workload template can't change on a running sandbox, so create a new resource
+to run a different workload. The prototype makes the whole spec immutable;
+later versions can allow in-place changes to other fields, such as policy and
+providers, while the workload stays immutable.
 
 ### Step 4: restart the controller
 
