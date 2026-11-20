@@ -25,12 +25,9 @@ You need:
 - For Part 2, port 18291 free and the OpenShell 0.1.6 supervisor and sandbox
   images available to Docker.
 
-Run every command from the root of your OpenShell checkout. The build output
-and the demo kubeconfig both go in its `target` directory:
-
-```shell
-cd ~/src/OpenShell   # replace with the path to your checkout
-```
+Run every command from the root of your OpenShell checkout, in both
+terminals. The build output and the demo kubeconfig both go in its `target`
+directory.
 
 ## Part 1: manage a sandbox from Kubernetes
 
@@ -68,11 +65,10 @@ openshellsandboxes.openshell.ai          2026-11-19T00:00:00Z
 openshellsandboxtemplates.openshell.ai   2026-11-19T00:00:00Z
 ```
 
-In a second terminal, change to the same checkout and start the controller.
+In a second terminal, from the same checkout, start the controller.
 One controller binds one namespace to one gateway workspace:
 
 ```shell
-cd ~/src/OpenShell   # replace with the path to your checkout
 export KUBECONFIG=$PWD/target/openshell-crd-demo.kubeconfig
 MTLS=~/.config/openshell/gateways/openshell/mtls
 target/debug/openshell-k8s-controller \
