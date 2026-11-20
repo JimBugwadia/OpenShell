@@ -374,7 +374,18 @@ fn generated_crd_has_no_unsigned_formats_and_exposes_printer_columns() {
         .iter()
         .map(|c| c["name"].as_str().unwrap())
         .collect();
-    assert_eq!(columns, ["Phase", "Reason", "Gateway Phase", "Age"]);
+    assert_eq!(
+        columns,
+        [
+            "Sandbox",
+            "Phase",
+            "Reason",
+            "Gateway Phase",
+            "Template Revision",
+            "Sandbox ID",
+            "Age"
+        ]
+    );
     let status = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["status"]["properties"];
     assert_eq!(status["conditions"]["x-kubernetes-list-type"], "map");
     assert_eq!(
