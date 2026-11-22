@@ -16,9 +16,9 @@ use kube_runtime::{
     watcher,
 };
 use openshell_k8s_controller::{
-    Binding, FINALIZER, Gateway, GatewayError, OpenShellSandbox, Outcome, Persistence,
-    PersistenceError, RemoteSandbox, SandboxStatus, advance, crds, next_observation,
-    sync_conditions,
+    Binding, FINALIZER, Gateway, GatewayError, Missing, OpenShellSandbox, Outcome, Persistence,
+    PersistenceError, RemoteSandbox, RestartPolicy, SandboxInputs, SandboxStatus,
+    ServiceAuthorization, advance, crds, next_observation, sync_conditions,
     template::{
         FAMILY_LABEL, GENERATION_LABEL, OpenShellSandboxTemplate, Revision, SOURCE_UID_LABEL,
         TemplateGateway, apply_publish, revision_name,
@@ -74,13 +74,78 @@ struct RpcGateway {
     client: OpenShellClient,
 }
 
+fn sandbox_spec(inputs: &SandboxInputs) -> proto::SandboxSpec {
+    let template = inputs.workload.as_ref().map(|workload| {
+        let resources = workload.resources.clone().unwrap_or_default();
+        let limits: std::collections::BTreeMap<String, prost_types::Value> =
+            [("cpu", resources.cpu), ("memory", resources.memory)]
+                .into_iter()
+                .filter(|(_, quantity)| !quantity.is_empty())
+                .map(|(key, quantity)| {
+                    (
+                        key.to_owned(),
+                        prost_types::Value {
+                            kind: Some(prost_types::value::Kind::StringValue(quantity)),
+                        },
+                    )
+                })
+                .collect();
+        proto::SandboxTemplate {
+            image: workload.image.clone(),
+            environment: workload.environment.clone().into_iter().collect(),
+            resources: (!limits.is_empty()).then(|| prost_types::Struct {
+                fields: std::collections::BTreeMap::from([(
+                    "limits".to_owned(),
+                    prost_types::Value {
+                        kind: Some(prost_types::value::Kind::StructValue(prost_types::Struct {
+                            fields: limits,
+                        })),
+                    },
+                )]),
+            }),
+            ..Default::default()
+        }
+    });
+    proto::SandboxSpec {
+        template,
+        providers: inputs.providers.clone(),
+        command: inputs.command.clone(),
+        restart_policy: match inputs.restart_policy {
+            None => proto::SandboxRestartPolicy::Unspecified,
+            Some(RestartPolicy::Never) => proto::SandboxRestartPolicy::Never,
+            Some(RestartPolicy::OnFailure) => proto::SandboxRestartPolicy::OnFailure,
+            Some(RestartPolicy::Always) => proto::SandboxRestartPolicy::Always,
+        }
+        .into(),
+        ..Default::default()
+    }
+}
+
 fn create_request(binding: &Binding) -> CreateSandboxRequest {
     CreateSandboxRequest {
         workspace_scope: Some(proto::workspace_selector(&binding.workspace)),
         name: binding.sandbox_name.clone(),
         workload_template: binding.workload_template.clone(),
         request_id: binding.create_request_id.clone(),
-        spec: Some(proto::SandboxSpec::default()),
+        spec: Some(sandbox_spec(&binding.inputs)),
+        service_exposures: binding
+            .inputs
+            .service_exposures
+            .iter()
+            .map(|exposure| proto::SandboxServiceExposure {
+                service: exposure.service.clone(),
+                // The schema limits the port to 1-65535; the gateway rejects 0.
+                target_port: u32::try_from(exposure.target_port).unwrap_or_default(),
+                authorization_mode: match exposure.authorization {
+                    None => proto::ServiceAuthorizationMode::Unspecified,
+                    Some(ServiceAuthorization::Strip) => proto::ServiceAuthorizationMode::Strip,
+                    Some(ServiceAuthorization::BearerPassthrough) => {
+                        proto::ServiceAuthorizationMode::BearerPassthrough
+                    }
+                }
+                .into(),
+            })
+            .collect(),
         // Lets CLI users see which Kubernetes resource owns the sandbox.
         // Informational only: ownership is never inferred from these values.
         annotations: HashMap::from([
@@ -99,6 +164,13 @@ fn create_request(binding: &Binding) -> CreateSandboxRequest {
         ]),
         ..Default::default()
     }
+}
+
+/// The gateway reports an unknown provider as `provider '<name>' not found`.
+fn missing_provider(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::FailedPrecondition
+        && status.message().starts_with("provider '")
+        && status.message().ends_with("' not found")
 }
 
 fn remote(sandbox: openshell_sdk::raw::Sandbox) -> Result<RemoteSandbox, GatewayError> {
@@ -146,8 +218,15 @@ impl Gateway for RpcGateway {
             Err(status) if status.code() == tonic::Code::AlreadyExists => {
                 Err(GatewayError::Collision)
             }
-            // Validation, missing-template, and authorization refusals precede
-            // any gateway side effect.
+            // Only the workload template lookup reports NotFound on create.
+            Err(status) if status.code() == tonic::Code::NotFound => {
+                Err(GatewayError::Missing(Missing::Template))
+            }
+            Err(status) if missing_provider(&status) => {
+                Err(GatewayError::Missing(Missing::Provider))
+            }
+            // Validation and authorization refusals precede any gateway side
+            // effect.
             Err(status)
                 if matches!(
                     status.code(),
@@ -420,12 +499,17 @@ async fn reconcile(object: Arc<OpenShellSandbox>, context: Arc<Context>) -> Resu
     let generation = object.metadata.generation.ok_or(Error::Identity)?;
     // Resolve the template once, before the first submission. The journal then
     // pins the revision, so a later template change never alters this sandbox.
-    let template = match object.status.as_ref() {
-        Some(status) => status.journal.binding.workload_template.clone(),
-        None => match resolve_template(&context.templates, &object.spec.workload_template).await? {
-            Some(template) => template,
-            None => return Ok(Action::requeue(TEMPLATE_WAIT)),
-        },
+    let refusal = object.spec.refusal(&context.namespace);
+    let template = match (object.status.as_ref(), &object.spec.workload_template) {
+        (Some(status), _) => status.journal.binding.workload_template.clone(),
+        (None, Some(reference)) if refusal.is_none() => {
+            match resolve_template(&context.templates, &reference.name).await? {
+                Some(template) => template,
+                None => return Ok(Action::requeue(TEMPLATE_WAIT)),
+            }
+        }
+        // An inline workload, the gateway's default image, or a refused spec.
+        (None, _) => String::new(),
     };
     let binding = Binding::new(
         &uid,
@@ -436,7 +520,8 @@ async fn reconcile(object: Arc<OpenShellSandbox>, context: Arc<Context>) -> Resu
         &template,
         now,
     )
-    .map_err(|_| Error::Identity)?;
+    .map_err(|_| Error::Identity)?
+    .with_inputs(object.spec.inputs.clone());
     let mut status = object
         .status
         .clone()
@@ -454,6 +539,17 @@ async fn reconcile(object: Arc<OpenShellSandbox>, context: Arc<Context>) -> Resu
         status.reason = "BindingChanged".into();
         store.save(&status).await?;
         return Ok(Action::requeue(Duration::from_secs(30)));
+    }
+    // A refused spec never reaches the gateway, so deleting it needs no cleanup.
+    if let Some(reason) = refusal
+        && !deleting
+    {
+        if status.reason != reason {
+            status.phase = "Blocked".into();
+            status.reason = reason.into();
+            store.save(&status).await?;
+        }
+        return Ok(Action::requeue(REFUSED_WAIT));
     }
     // Kubernetes can advance generation when deletion metadata changes. The
     // immutable authored spec is checked against the journal above; generation
@@ -491,6 +587,8 @@ async fn reconcile(object: Arc<OpenShellSandbox>, context: Arc<Context>) -> Resu
 
 /// Delay before checking again for a template that isn't published yet.
 const TEMPLATE_WAIT: Duration = Duration::from_secs(10);
+/// A refused spec can't change, so it's rechecked only to observe deletion.
+const REFUSED_WAIT: Duration = Duration::from_mins(5);
 
 /// Gateway template for a sandbox's `workloadTemplate`: the current revision of
 /// an `OpenShellSandboxTemplate` with that name, or else the name itself, an
@@ -710,7 +808,7 @@ mod tests {
 
     use http_body_util::{BodyExt, Full};
     use openshell_k8s_controller::{
-        SandboxSpec,
+        SandboxSpec, TemplateRef,
         template::{TemplateSpec, TemplateStatus},
     };
     use serde::Serialize;
@@ -835,7 +933,11 @@ mod tests {
         let mut object = OpenShellSandbox::new(
             "agent",
             SandboxSpec {
-                workload_template: "agent-v1".into(),
+                workload_template: Some(TemplateRef {
+                    name: "agent-v1".into(),
+                    namespace: None,
+                }),
+                inputs: SandboxInputs::default(),
             },
         );
         object.metadata.uid = Some("fd229996-bc63-413e-9dc0-cc5f05abe5bd".into());
@@ -1038,6 +1140,75 @@ mod tests {
         };
         store.save(&status).await.unwrap();
         assert!(calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn create_inputs_map_to_the_sandbox_spec() {
+        let inputs = SandboxInputs {
+            workload: Some(TemplateSpec {
+                image: "registry.example.com/agent:1".into(),
+                environment: [("MODE".to_owned(), "prod".to_owned())].into(),
+                resources: Some(openshell_k8s_controller::template::TemplateResources {
+                    cpu: "2".into(),
+                    memory: String::new(),
+                }),
+            }),
+            providers: vec!["nvidia".into()],
+            command: vec!["python".into(), "/app/agent.py".into()],
+            restart_policy: Some(RestartPolicy::OnFailure),
+            service_exposures: vec![openshell_k8s_controller::ServiceExposure {
+                service: "web".into(),
+                target_port: 8080,
+                authorization: Some(ServiceAuthorization::BearerPassthrough),
+            }],
+        };
+        let binding = Binding::new(
+            "fd229996-bc63-413e-9dc0-cc5f05abe5bd",
+            "agent",
+            "agents",
+            "http://gateway:8080",
+            "default",
+            "",
+            1,
+        )
+        .unwrap()
+        .with_inputs(inputs);
+        let request = create_request(&binding);
+        let spec = request.spec.unwrap();
+        let template = spec.template.unwrap();
+        assert_eq!(template.image, "registry.example.com/agent:1");
+        assert_eq!(
+            template.environment.get("MODE").map(String::as_str),
+            Some("prod")
+        );
+        let limits = &template.resources.unwrap().fields["limits"];
+        let Some(prost_types::value::Kind::StructValue(limits)) = &limits.kind else {
+            panic!("limits must be a struct");
+        };
+        assert_eq!(limits.fields.len(), 1, "an empty quantity is omitted");
+        assert_eq!(spec.providers, ["nvidia"]);
+        assert_eq!(spec.command, ["python", "/app/agent.py"]);
+        assert_eq!(
+            spec.restart_policy,
+            i32::from(proto::SandboxRestartPolicy::OnFailure)
+        );
+        assert_eq!(request.workload_template, "");
+        assert_eq!(request.service_exposures.len(), 1);
+        assert_eq!(request.service_exposures[0].target_port, 8080);
+        assert_eq!(
+            request.service_exposures[0].authorization_mode,
+            i32::from(proto::ServiceAuthorizationMode::BearerPassthrough)
+        );
+    }
+
+    #[test]
+    fn only_the_gateway_provider_message_counts_as_a_missing_provider() {
+        let missing = tonic::Status::failed_precondition("provider 'nvidia' not found");
+        assert!(missing_provider(&missing));
+        let other = tonic::Status::failed_precondition("sandbox updates are not enabled");
+        assert!(!missing_provider(&other));
+        let wrong_code = tonic::Status::not_found("provider 'nvidia' not found");
+        assert!(!missing_provider(&wrong_code));
     }
 
     #[test]

@@ -108,8 +108,11 @@ journal, including request IDs, attempt counters, and RFC 3339 retry
 timestamps; don't edit it.
 
 The sandbox spec is immutable; create a new resource to request a different
-template. `workloadTemplate` names an `OpenShellSandboxTemplate` in the same
-namespace or, if none exists, a gateway template. The controller resolves it
+template. `workloadTemplate.name` names an `OpenShellSandboxTemplate` in the
+same namespace or, if none exists, a gateway template. Use `workload` instead
+to describe the image inline. Set `command` to start the agent, because the
+image's own command never runs, and list gateway providers by name in
+`providers`. The controller resolves it
 once, before the first submission, and records the gateway revision in
 `templateRevision`, so later template changes don't affect the sandbox.
 
@@ -142,8 +145,8 @@ kubectl --context "$KUBE_CONTEXT" delete openshellsandbox support-agent-demo \
   (30 seconds, doubling to a one-hour cap) for at most 10 attempts and within a
   23-hour window. While retrying, the resource reports `Progressing`. Exhausted
   retries block the resource; they do not imply successful recovery.
-- A gateway refusal, such as a missing workload template, blocks the resource
-  with reason `CreateRejected`. Delete the resource and create a corrected one;
+- A gateway refusal blocks the resource with reason `TemplateNotFound`,
+  `ProviderNotFound`, or `CreateRejected`. Delete the resource and create a corrected one;
   deletion completes without manual finalizer removal.
 - The controller never adopts an existing gateway sandbox, recreates a
   missing/stopped sandbox, starts an explicitly stopped sandbox, or overwrites

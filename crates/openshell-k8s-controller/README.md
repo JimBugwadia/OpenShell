@@ -36,14 +36,24 @@ metadata:
   name: support-agent
   namespace: agents
 spec:
-  workloadTemplate: support-agent
+  workloadTemplate:
+    name: support-agent
 ```
 
-`workloadTemplate` names an `OpenShellSandboxTemplate` in the same namespace or,
-if none exists, a workload template that already exists in the gateway
-workspace selected by `--workspace`. The controller doesn't create policies or
-providers. Gateway default governance applies; workload templates do not select
-policy or credentials. The entire sandbox spec is immutable through a CEL
+`workloadTemplate.name` names an `OpenShellSandboxTemplate` in the same
+namespace or, if none exists, a workload template that already exists in the
+gateway workspace selected by `--workspace`. `workloadTemplate.namespace` is
+optional and must match the sandbox's namespace; the controller blocks any
+other value with reason `TemplateNamespaceNotAllowed`. Instead of a template,
+`workload` describes the image, environment, and resources inline; setting both
+is rejected at admission. Omitting both uses the gateway's default image.
+
+The spec also takes `providers` (gateway provider names), `command` (the
+agent's start command; the image's own command never runs), `restartPolicy`
+(`Never`, `OnFailure`, or `Always`), and `serviceExposures`. The controller
+doesn't create policies or providers, and gateway default governance applies.
+The controller records these inputs in the journal so a replayed create sends
+the original request. The entire sandbox spec is immutable through a CEL
 admission transition rule. Reapplying equivalent content is allowed. Change the workload by creating a
 new resource, not by updating an existing resource.
 
@@ -74,7 +84,9 @@ while operations are outstanding is unsupported.
   requires operator investigation.
 - Validation, missing-template, and authorization refusals (`InvalidArgument`,
   `NotFound`, `FailedPrecondition`, `PermissionDenied`, `Unauthenticated`)
-  block the resource with reason `CreateRejected` and are not retried.
+  block the resource and are not retried. A missing workload template reports
+  `TemplateNotFound`, an unknown provider reports `ProviderNotFound`, and other
+  refusals report `CreateRejected`.
 - Status records `createMayExist` before each create submission. Deleting a
   resource whose every create attempt was rejected or collided completes
   without a gateway call. After any uncertain attempt, deletion first recovers
@@ -157,7 +169,8 @@ status:
       createRequestId: fd229996-bc63-413e-9dc0-cc5f05abe5bd
       deleteRequestId: fd229996-bc63-413e-9dc0-cc5f05abe5bc
       createStartedAt: "2026-11-13T18:03:58Z"
-      workloadTemplate: support-agent-r1
+      workloadTemplate:
+        name: support-agent-r1
     createAttempts: 1
     deleteAttempts: 0
     deleteStartedAt: null

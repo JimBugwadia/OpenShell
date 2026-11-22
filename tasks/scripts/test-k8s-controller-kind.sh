@@ -92,19 +92,24 @@ metadata:
   name: schema-check
   namespace: ${NAMESPACE}
 spec:
-  workloadTemplate: support-agent-v2
+  workloadTemplate:
+    name: support-agent-v2
 EOF
 
 if kctl create --dry-run=server -f - <<EOF
 apiVersion: openshell.ai/v1alpha1
 kind: OpenShellSandbox
 metadata:
-  name: missing-template
+  name: template-and-workload
   namespace: ${NAMESPACE}
-spec: {}
+spec:
+  workloadTemplate:
+    name: support-agent-v2
+  workload:
+    image: registry.example.com/agent:1
 EOF
 then
-  echo "ERROR: API server accepted a resource without workloadTemplate." >&2
+  echo "ERROR: API server accepted both workloadTemplate and workload." >&2
   exit 1
 fi
 
@@ -115,13 +120,14 @@ metadata:
   name: immutable-check
   namespace: ${NAMESPACE}
 spec:
-  workloadTemplate: support-agent-v2
+  workloadTemplate:
+    name: support-agent-v2
 EOF
 
 if kctl patch openshellsandbox immutable-check \
   --namespace="${NAMESPACE}" \
   --type=merge \
-  --patch '{"spec":{"workloadTemplate":"different-template"}}'; then
+  --patch '{"spec":{"workloadTemplate":{"name":"different-template"}}}'; then
   echo "ERROR: API server accepted a mutation to immutable spec." >&2
   exit 1
 fi

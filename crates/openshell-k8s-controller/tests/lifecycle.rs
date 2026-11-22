@@ -5,8 +5,9 @@ use std::{collections::VecDeque, sync::Mutex};
 
 use async_trait::async_trait;
 use openshell_k8s_controller::{
-    Binding, ConditionStatus, Gateway, GatewayError, Outcome, Persistence, PersistenceError,
-    RemoteSandbox, SandboxStatus, advance, crd, sync_conditions,
+    Binding, ConditionStatus, Gateway, GatewayError, Missing, Outcome, Persistence,
+    PersistenceError, RemoteSandbox, SandboxInputs, SandboxSpec, SandboxStatus, TemplateRef,
+    advance, crd, sync_conditions,
 };
 
 const NOW: i64 = 10_000;
@@ -337,7 +338,77 @@ fn generated_crd_uses_transition_cel_and_status_subresource() {
             [0]["rule"],
         "self == oldSelf"
     );
+    assert_eq!(
+        crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["x-kubernetes-validations"]
+            [1]["rule"],
+        "!(has(self.workloadTemplate) && has(self.workload))"
+    );
+    for field in [
+        "workloadTemplate",
+        "workload",
+        "providers",
+        "command",
+        "restartPolicy",
+        "serviceExposures",
+    ] {
+        assert!(spec_schema["properties"][field].is_object(), "{field}");
+    }
     assert!(crd["spec"]["versions"][0]["subresources"]["status"].is_object());
+}
+
+#[test]
+fn template_in_another_namespace_is_refused() {
+    let spec = |namespace: Option<&str>| SandboxSpec {
+        workload_template: Some(TemplateRef {
+            name: "agent".into(),
+            namespace: namespace.map(Into::into),
+        }),
+        inputs: SandboxInputs::default(),
+    };
+    assert_eq!(spec(None).refusal("agents"), None);
+    assert_eq!(spec(Some("agents")).refusal("agents"), None);
+    assert_eq!(
+        spec(Some("platform-templates")).refusal("agents"),
+        Some("TemplateNamespaceNotAllowed")
+    );
+}
+
+#[tokio::test]
+async fn missing_template_or_provider_blocks_with_its_own_reason() {
+    for (missing, reason) in [
+        (Missing::Template, "TemplateNotFound"),
+        (Missing::Provider, "ProviderNotFound"),
+    ] {
+        let mut status = initial();
+        let store = Store {
+            durable: Mutex::new(status.clone()),
+            fail: false,
+        };
+        let gateway = mock(&store);
+        gateway
+            .create_results
+            .lock()
+            .unwrap()
+            .push_back(Err(GatewayError::Missing(missing)));
+        advance(&mut status, false, NOW, &gateway, &store)
+            .await
+            .unwrap();
+        assert_eq!(
+            (status.phase.as_str(), status.reason.as_str()),
+            ("Blocked", reason)
+        );
+        // The spec is immutable, so the controller never retries.
+        advance(&mut status, false, NOW + 3600, &gateway, &store)
+            .await
+            .unwrap();
+        assert_eq!(gateway.creates.lock().unwrap().len(), 1);
+        assert_eq!(
+            advance(&mut status, true, NOW + 3630, &gateway, &store)
+                .await
+                .unwrap(),
+            Outcome::Finalize
+        );
+    }
 }
 
 #[test]

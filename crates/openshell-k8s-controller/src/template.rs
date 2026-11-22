@@ -173,7 +173,7 @@ pub fn apply_publish(
             status.report(generation, "Ready", "Published", now);
         }
         Err(GatewayError::Collision) => status.report(generation, "Blocked", "NameCollision", now),
-        Err(GatewayError::Rejected) => {
+        Err(GatewayError::Rejected | GatewayError::Missing(_)) => {
             status.report(generation, "Blocked", "PublishRejected", now);
         }
         Err(GatewayError::Uncertain) => {

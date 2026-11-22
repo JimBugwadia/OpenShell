@@ -65,10 +65,90 @@ pub fn next_observation(status: &SandboxStatus, now: i64, deleting: bool) -> i64
 )]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxSpec {
-    /// An `OpenShellSandboxTemplate` in the same namespace, or else an existing
-    /// gateway workload template. No credentials in the CR.
+    /// The workload's template: an `OpenShellSandboxTemplate`, or else an
+    /// existing gateway workload template. Omit it to describe the workload
+    /// inline with `workload`, or to use the gateway's default image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_template: Option<TemplateRef>,
+    #[serde(flatten)]
+    pub inputs: SandboxInputs,
+}
+
+/// A reference to a workload template.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TemplateRef {
     #[schemars(length(min = 1, max = 253))]
-    pub workload_template: String,
+    pub name: String,
+    /// The template's namespace. Defaults to the sandbox's namespace, which is
+    /// currently the only namespace the controller resolves templates in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+}
+
+/// Create inputs besides the template. No credentials: providers are
+/// referenced by name.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxInputs {
+    /// An inline workload, for a sandbox without a template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload: Option<template::TemplateSpec>,
+    /// Gateway providers to attach, by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub providers: Vec<String>,
+    /// The agent's start command. The image's entrypoint and command never
+    /// run, so a sandbox without a command starts no agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+    /// What the gateway does when the command exits. Defaults to `Never`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_policy: Option<RestartPolicy>,
+    /// HTTP services in the sandbox to expose through gateway-managed URLs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_exposures: Vec<ServiceExposure>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum RestartPolicy {
+    Never,
+    OnFailure,
+    Always,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceExposure {
+    /// Service name. Omit it for the sandbox's unnamed service.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub service: String,
+    /// Loopback TCP port the service listens on inside the sandbox.
+    #[schemars(range(min = 1, max = 65535))]
+    pub target_port: i32,
+    /// Whether the service receives the caller's Authorization header.
+    /// Defaults to `Strip`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<ServiceAuthorization>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub enum ServiceAuthorization {
+    Strip,
+    BearerPassthrough,
+}
+
+impl SandboxSpec {
+    /// Why the controller refuses this spec before submitting it, if it does.
+    /// The spec is immutable, so the answer never changes for a resource.
+    #[must_use]
+    pub fn refusal(&self, namespace: &str) -> Option<&'static str> {
+        let other_namespace = self
+            .workload_template
+            .as_ref()
+            .and_then(|reference| reference.namespace.as_deref())
+            .is_some_and(|ns| ns != namespace);
+        other_namespace.then_some("TemplateNamespaceNotAllowed")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -87,6 +167,9 @@ pub struct Binding {
     #[schemars(with = "Rfc3339Time")]
     pub create_started_at: i64,
     pub workload_template: String,
+    /// The create inputs, recorded so every replay sends the original request.
+    #[serde(default)]
+    pub inputs: SandboxInputs,
 }
 
 impl Binding {
@@ -118,7 +201,14 @@ impl Binding {
             delete_request_id: uuid::Uuid::from_bytes(delete_bytes).to_string(),
             create_started_at: now,
             workload_template: template.into(),
+            inputs: SandboxInputs::default(),
         })
+    }
+
+    #[must_use]
+    pub fn with_inputs(mut self, inputs: SandboxInputs) -> Self {
+        self.inputs = inputs;
+        self
     }
 }
 
@@ -234,7 +324,16 @@ fn ready_message(phase: &str, reason: &str) -> &'static str {
         "CreateReplayExhausted" => "Create replay stopped; investigate the gateway sandbox.",
         "NameCollision" => "A gateway sandbox with this name already exists.",
         "CreateRejected" => {
-            "The gateway rejected the create request; check the workload template and that the controller is a sandbox manager."
+            "The gateway rejected the create request; check the workload and that the controller is a sandbox manager."
+        }
+        "TemplateNotFound" => {
+            "The workload template doesn't exist in the namespace or the gateway workspace."
+        }
+        "ProviderNotFound" => {
+            "A provider the sandbox lists doesn't exist in the gateway workspace."
+        }
+        "TemplateNamespaceNotAllowed" => {
+            "The workload template must be in the sandbox's namespace."
         }
         "AcceptedSandboxMissing" => "The gateway no longer reports the accepted sandbox.",
         "ObservationUnavailable" => "The controller cannot observe the gateway sandbox.",
@@ -307,10 +406,16 @@ pub fn sync_condition(
 pub fn crd() -> Result<serde_json::Value, serde_json::Error> {
     let mut value = serde_json::to_value(OpenShellSandbox::crd())?;
     let schema = &mut value["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"];
-    schema["spec"]["x-kubernetes-validations"] = serde_json::json!([{
-        "rule": "self == oldSelf",
-        "message": "spec is immutable; create a new Sandbox for a different workload"
-    }]);
+    schema["spec"]["x-kubernetes-validations"] = serde_json::json!([
+        {
+            "rule": "self == oldSelf",
+            "message": "spec is immutable; create a new Sandbox for a different workload"
+        },
+        {
+            "rule": "!(has(self.workloadTemplate) && has(self.workload))",
+            "message": "set workloadTemplate or workload, not both"
+        }
+    ]);
     map_conditions(schema);
     Ok(value)
 }
@@ -414,8 +519,34 @@ pub enum GatewayError {
     Collision,
     /// The gateway definitively refused this request before any side effect.
     Rejected,
+    /// Like `Rejected`: a template or provider that the request names doesn't exist.
+    Missing(Missing),
     Uncertain,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Missing {
+    Template,
+    Provider,
+}
+
+impl Missing {
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Template => "TemplateNotFound",
+            Self::Provider => "ProviderNotFound",
+        }
+    }
+}
+
+/// Reasons that end submission: the spec is immutable, so retrying can't help.
+const REFUSED: [&str; 5] = [
+    "NameCollision",
+    "CreateRejected",
+    "TemplateNotFound",
+    "ProviderNotFound",
+    "TemplateNamespaceNotAllowed",
+];
 
 #[derive(Debug, thiserror::Error)]
 #[error("Kubernetes persistence failed")]
@@ -469,7 +600,7 @@ pub async fn advance(
         return Ok(Outcome::Finalize);
     }
     if status.sandbox_id.is_none() {
-        if matches!(status.reason.as_str(), "NameCollision" | "CreateRejected") {
+        if REFUSED.contains(&status.reason.as_str()) {
             return Ok(Outcome::Requeue);
         }
         if !retry_allowed(
@@ -509,11 +640,16 @@ pub async fn advance(
                 status.journal.create_may_exist = false;
                 status.report("Blocked", "CreateRejected");
             }
+            Err(GatewayError::Missing(missing)) if !may_already_exist => {
+                status.journal.create_may_exist = false;
+                status.report("Blocked", missing.reason());
+            }
             Err(GatewayError::Collision) => {
                 status.journal.create_may_exist = may_already_exist;
                 status.report("Blocked", "NameCollision");
             }
-            Ok(_) | Err(GatewayError::Uncertain | GatewayError::Rejected) => {
+            Ok(_)
+            | Err(GatewayError::Uncertain | GatewayError::Rejected | GatewayError::Missing(_)) => {
                 status.report("Progressing", "CreateUncertain");
             }
         }

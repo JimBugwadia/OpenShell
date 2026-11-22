@@ -103,7 +103,8 @@ metadata:
   name: support-agent
   namespace: agents
 spec:
-  workloadTemplate: demo-agent
+  workloadTemplate:
+    name: demo-agent
 EOF
 kubectl wait --for=condition=Ready ossbxt/demo-agent -n agents --timeout=60s
 kubectl wait --for=condition=Ready ossbx/support-agent -n agents --timeout=300s
@@ -145,7 +146,7 @@ Point out: the gateway record carries `kubernetes.openshell.ai/namespace`,
 
 ```shell
 kubectl patch ossbx support-agent -n agents --type=merge \
-  -p '{"spec":{"workloadTemplate":"something-else"}}'
+  -p '{"spec":{"workloadTemplate":{"name":"something-else"}}}'
 ```
 
 Expected: the API server rejects the change with an `immutable` error. The
@@ -192,14 +193,15 @@ metadata:
   name: missing-template
   namespace: agents
 spec:
-  workloadTemplate: does-not-exist
+  workloadTemplate:
+    name: does-not-exist
 EOF
-kubectl wait --for=jsonpath='{.status.reason}'=CreateRejected ossbx/missing-template -n agents
+kubectl wait --for=jsonpath='{.status.reason}'=TemplateNotFound ossbx/missing-template -n agents
 kubectl get ossbx -n agents
 kubectl delete ossbx missing-template -n agents
 ```
 
-Expected: `Blocked` with reason `CreateRejected`, and the delete completes
+Expected: `Blocked` with reason `TemplateNotFound`, and the delete completes
 without removing the finalizer by hand, because no gateway record can exist.
 
 ### Step 7: measure the etcd footprint

@@ -14,7 +14,7 @@
 #   4. Change the template: it publishes a new revision, and the running
 #      sandbox stays on the revision it started with.
 #   5. Restart the controller and confirm it doesn't create a duplicate.
-#   6. Request a missing template: blocked with CreateRejected, deletes cleanly.
+#   6. Request a missing template: blocked with TemplateNotFound, deletes cleanly.
 #   7. Delete the sandbox and the template, and confirm the gateway removes the
 #      sandbox and every template revision.
 # The script deletes only what it created and exits nonzero on any failed check.
@@ -193,7 +193,8 @@ metadata:
   name: support-agent
   namespace: ${NAMESPACE}
 spec:
-  workloadTemplate: ${TEMPLATE}
+  workloadTemplate:
+    name: ${TEMPLATE}
 EOF
 run kctl wait --for=condition=Ready --timeout=60s "ossbxt/${TEMPLATE}" -n "${NAMESPACE}"
 run kctl wait --for=condition=Ready "--timeout=${TIMEOUT}s" ossbx/support-agent -n "${NAMESPACE}"
@@ -238,7 +239,7 @@ pass "command ran inside the sandbox"
 
 step "3. The workload template is immutable; changes are rejected at admission"
 if kctl patch ossbx support-agent -n "${NAMESPACE}" --type=merge \
-  -p '{"spec":{"workloadTemplate":"something-else"}}' 2>&1; then
+  -p '{"spec":{"workloadTemplate":{"name":"something-else"}}}' 2>&1; then
   fail "API server accepted a workload template change"
 fi
 pass "workload change rejected; create a new resource to run a different workload"
@@ -276,9 +277,10 @@ metadata:
   name: missing-template
   namespace: ${NAMESPACE}
 spec:
-  workloadTemplate: does-not-exist
+  workloadTemplate:
+    name: does-not-exist
 EOF
-run kctl wait --for=jsonpath='{.status.reason}'=CreateRejected --timeout=120s \
+run kctl wait --for=jsonpath='{.status.reason}'=TemplateNotFound --timeout=120s \
   ossbx/missing-template -n "${NAMESPACE}"
 run kctl get ossbx -n "${NAMESPACE}"
 [ "$(jp missing-template '{.status.conditions[?(@.type=="Ready")].status}')" = "False" ] \
