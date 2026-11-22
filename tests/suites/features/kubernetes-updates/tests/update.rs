@@ -12,6 +12,10 @@ use std::sync::LazyLock;
 use testkit::sdk::raw::{AuthedGrpcClient, AuthedSandboxUpdatesClient, proto};
 use testkit::{Context, Sandbox};
 
+fn main() -> std::process::ExitCode {
+    testkit::main()
+}
+
 // Multi-platform release manifests; no test-local tags or cluster image loads.
 const ORIGINAL_IMAGE_DEFAULT: &str = "mirror.gcr.io/library/alpine:3.21@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507";
 const UPDATED_IMAGE_DEFAULT: &str = "mirror.gcr.io/library/alpine:3.22@sha256:5291449c3df73caf6ed85e649dec1b9e818b39a5d8c871e97afc13e9cd5e8fa8";
@@ -458,10 +462,9 @@ async fn image_update_retains_workspace_and_identity(cx: &mut Context) -> testki
     let sandbox = cx
         // The testkit's unique prefix leaves five characters of the name limit.
         .sandbox("image")
-        .spec(|spec| spec.image = Some(ORIGINAL_IMAGE.to_string()))
-        .create()
+        .image(ORIGINAL_IMAGE.as_str())
+        .create_ready()
         .await?;
-    sandbox.wait_ready().await?;
     let original = get_sandbox(&mut client, workspace, sandbox.name()).await;
     let id = &original.metadata.as_ref().expect("sandbox metadata").id;
     assert!(!id.is_empty(), "sandbox must have a canonical ID");
@@ -597,10 +600,9 @@ async fn terminal_workload_can_stop_update_and_restart(cx: &mut Context) -> test
     let sandbox = cx
         .sandbox("term")
         .restart_policy(testkit::sdk::SandboxRestartPolicy::Never)
-        .spec(|spec| spec.image = Some(ORIGINAL_IMAGE.to_string()))
-        .create()
+        .image(ORIGINAL_IMAGE.as_str())
+        .create_ready()
         .await?;
-    sandbox.wait_ready().await?;
     let original = get_sandbox(&mut client, workspace, sandbox.name()).await;
     let before = sandbox_resource(sandbox.id()).await;
     let original_claims = claim_uids(&before).await;

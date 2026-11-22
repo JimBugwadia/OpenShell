@@ -8,10 +8,21 @@
 //! `#[testkit::test]` also registers them, so the `openshell-conformance`
 //! program in `src/main.rs` runs them by linking this library.
 
+mod attach;
 mod cli;
+mod create_upload;
 mod credential_gating;
+mod exec_cli;
 mod file_transfer;
+mod filesystem_policy;
+mod image;
+mod labels;
 mod lifecycle;
 mod persistent_workspace;
 mod policy_advisor;
+mod process;
+mod settings;
 mod smoke;
+mod ssh;
+mod templates;
+mod workspaces;

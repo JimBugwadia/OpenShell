@@ -338,11 +338,11 @@ fn map_conditions(schema: &mut serde_json::Value) {
 struct Rfc3339Time;
 
 impl JsonSchema for Rfc3339Time {
-    fn schema_name() -> String {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
         "Rfc3339Time".into()
     }
 
-    fn json_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         rfc3339::date_time()
     }
 }
@@ -350,7 +350,7 @@ impl JsonSchema for Rfc3339Time {
 /// Serialize Unix seconds as RFC 3339 so `advance()` keeps integer arithmetic.
 mod rfc3339 {
     use chrono::{DateTime, SecondsFormat};
-    use schemars::schema::{InstanceType, Schema, SchemaObject};
+    use schemars::{Schema, json_schema};
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
 
     fn format(secs: i64) -> Option<String> {
@@ -364,12 +364,7 @@ mod rfc3339 {
     }
 
     pub fn date_time() -> Schema {
-        SchemaObject {
-            instance_type: Some(InstanceType::String.into()),
-            format: Some("date-time".into()),
-            ..SchemaObject::default()
-        }
-        .into()
+        json_schema!({ "type": "string", "format": "date-time" })
     }
 
     #[allow(clippy::trivially_copy_pass_by_ref)] // serde `with` signature

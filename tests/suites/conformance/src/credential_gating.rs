@@ -4,38 +4,37 @@
 //! Credential gating: which endpoints a provider credential may reach, and
 //! what the supervisor forwards upstream in REST bodies and WebSocket frames.
 //!
-//! Ported from the e2e tests added in NVIDIA/OpenShell#5264. The upstream
+//! Ported from the e2e tests added in ai-openshell/openshell#5264. The upstream
 //! servers run on the test host ([`host_server_support`]), so the suite
 //! requires sandboxes to reach the test host as `host.openshell.internal`.
 
 use std::time::Duration;
 
-use host_server_support::{HttpRecorder, Request, WebSocketRecorder};
+use host_server_support::{HttpRecorder, Request, TEST_HOST, WebSocketRecorder};
 use testkit::policy::{self, Access, Endpoint as _};
 use testkit::sdk::raw::proto;
 use testkit::{
-    Context, Error, GrpcCode, PYTHON_BINARIES, Poll, Result, ResultExt as _, Sandbox, YamlFile,
+    Context, Error, GrpcCode, PYTHON_BINARIES, Result, ResultExt as _, Sandbox, YamlFile,
 };
 
-const TEST_HOST: &str = "host.openshell.internal";
 const TOKEN_ENV: &str = "E2E_GATING_TOKEN";
 const TEST_SECRET: &str = "e2e-gating-secret-value";
 const PLACEHOLDER_PREFIX: &str = "openshell:resolve:env:";
 
-/// POSTs a body containing the provider's token to `TEST_HOST` on the port
-/// in `argv[1]`, directly rather than through a proxy.
+/// POSTs a body containing the provider's token to the host in `argv[1]` on
+/// the port in `argv[2]`, directly rather than through a proxy.
 const BODY_CLIENT: &str = r#"
 import os, sys, urllib.request
 body = ("prefix-" + os.environ["E2E_GATING_TOKEN"] + "-suffix").encode()
-request = urllib.request.Request(f"http://host.openshell.internal:{sys.argv[1]}/token", data=body, headers={"Content-Type": "text/plain"})
+request = urllib.request.Request(f"http://{sys.argv[1]}:{sys.argv[2]}/token", data=body, headers={"Content-Type": "text/plain"})
 urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=10).read()
 "#;
 
-/// Upgrades to WebSocket at `TEST_HOST` on the port in `argv[1]`, sends one
-/// binary frame, and waits briefly for the connection to be closed.
+/// Upgrades to WebSocket at the host in `argv[1]` on the port in `argv[2]`,
+/// sends one binary frame, and waits briefly for the connection to be closed.
 const WEBSOCKET_CLIENT: &str = r#"
 import base64, os, socket, sys
-host, port = "host.openshell.internal", int(sys.argv[1])
+host, port = sys.argv[1], int(sys.argv[2])
 with socket.create_connection((host, port), timeout=10) as sock:
     key = base64.b64encode(os.urandom(16)).decode()
     sock.sendall(f"GET /ws HTTP/1.1\r\nHost: {host}:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n".encode())
@@ -298,10 +297,8 @@ fn sandbox_with(
 ) -> testkit::SandboxBuilder {
     cx.sandbox(suffix)
         .policy(policy)
-        .spec(|spec| {
-            spec.image = Some(testkit::python_image());
-            spec.providers = providers.iter().map(ToString::to_string).collect();
-        })
+        .image(testkit::python_image())
+        .spec(|spec| spec.providers = providers.iter().map(ToString::to_string).collect())
         .command(["sleep", "infinity"])
 }
 
@@ -313,9 +310,9 @@ async fn create_sandbox(
     policy: proto::SandboxPolicy,
     providers: &[&str],
 ) -> Result<Sandbox> {
-    let sandbox = sandbox_with(cx, suffix, policy, providers).create().await?;
-    sandbox.wait_ready().await?;
-    Ok(sandbox)
+    sandbox_with(cx, suffix, policy, providers)
+        .create_ready()
+        .await
 }
 
 /// Fail unless the gateway rejects the sandbox as a failed precondition, and
@@ -338,11 +335,12 @@ async fn expect_rejected(
     }
 }
 
-/// Run `script` with the image's Python and `port` as its argument.
+/// Run `script` with the image's Python, and [`TEST_HOST`] and `port` as its
+/// arguments.
 async fn run_python(sandbox: &Sandbox, script: &str, port: u16) -> Result {
     let port = port.to_string();
     sandbox
-        .exec(["python3", "-c", script, &port])
+        .exec(["python3", "-c", script, TEST_HOST, &port])
         .await?
         .success()
         .context("run the client in the sandbox")?;
@@ -384,25 +382,15 @@ fn redact(request: &Request) -> String {
 
 /// Wait until new exec sessions report `expected` from [`TOKEN_PRESENCE`].
 async fn wait_for_token(sandbox: &Sandbox, expected: &str) -> Result {
-    testkit::poll_until(
-        &format!("the provider environment to report {expected}"),
-        Duration::from_secs(30),
-        Duration::from_millis(500),
-        async || {
-            let output = sandbox.exec(["sh", "-lc", TOKEN_PRESENCE]).await?;
-            Ok(if output.stdout.contains(expected) {
-                Poll::Ready(())
-            } else {
-                Poll::Pending(format!(
-                    "exit {}; stdout: {}; stderr: {}",
-                    output.exit_code,
-                    output.stdout.trim(),
-                    output.stderr.trim()
-                ))
-            })
-        },
-    )
-    .await
+    sandbox
+        .poll_exec(
+            &format!("the provider environment to report {expected}"),
+            Duration::from_secs(30),
+            ["sh", "-lc", TOKEN_PRESENCE],
+            |output| output.stdout.contains(expected),
+        )
+        .await?;
+    Ok(())
 }
 
 /// Replace `sandbox`'s policy with `policy` and wait until it is applied.

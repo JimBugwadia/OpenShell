@@ -19,7 +19,7 @@ k8s-openapi = { workspace = true }
 kube = { workspace = true }
 kube-runtime = { workspace = true }
 openshell-sdk = { path = "../openshell-sdk" }
-schemars = "0.8"
+schemars = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yml = { workspace = true }

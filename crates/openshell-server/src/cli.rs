@@ -154,16 +154,23 @@ struct RunArgs {
     #[arg(long, env = "OPENSHELL_DB_URL")]
     db_url: Option<String>,
 
+    /// Database identity source: default or azure-workload-identity.
+    #[arg(long, env = "OPENSHELL_DB_AUTH")]
+    db_auth: Option<openshell_core::config::DatabaseAuthMode>,
+
     /// Connection ceiling for the database pool, shared by every
     /// database-backed request.
     ///
     /// When unset, the gateway uses its backend default: 10 with Postgres,
     /// 5 with an on-disk `SQLite` database. An in-memory `SQLite` database is
-    /// always a single connection. Postgres needs at least 2, because the SSH
-    /// identity lock keeps one connection while it queries the pool, so the
-    /// gateway rejects 1 there at startup. Each replica opens its own pool,
-    /// plus a mutation lock pool on Postgres (`--db-lock-max-connections`), so
-    /// keep the total below what the database server itself admits.
+    /// always a single connection. Postgres needs at least 2, so the gateway
+    /// rejects 1 there at startup: an SSH identity or provider-refresh lock
+    /// holder keeps one data connection for its lock and queries the pool on
+    /// another, and the gateway caps those holders at half of
+    /// `database_max_connections` per replica. Each replica opens its own
+    /// pool, plus a mutation lock pool on Postgres
+    /// (`--db-lock-max-connections`), so keep the total below what the
+    /// database server itself admits.
     #[arg(
         long,
         env = "OPENSHELL_DB_MAX_CONNECTIONS",
@@ -217,6 +224,12 @@ struct RunArgs {
     /// requests against the issuer's JWKS endpoint.
     #[arg(long, env = "OPENSHELL_OIDC_ISSUER")]
     oidc_issuer: Option<String>,
+
+    /// Path to a PEM CA bundle for an OIDC issuer signed by a private CA.
+    /// Must be a regular file no larger than 1 MiB. The certificates augment
+    /// platform trust roots for OIDC requests only.
+    #[arg(long, env = "OPENSHELL_OIDC_CA_BUNDLE")]
+    oidc_ca_bundle: Option<PathBuf>,
 
     /// Development only: permit OIDC metadata and JWKS over HTTP when the
     /// endpoint uses a numeric loopback address.
@@ -319,6 +332,10 @@ struct RunArgs {
     #[arg(long, env = "OPENSHELL_SERVICE_HOSTNAME_FORMAT")]
     service_hostname_format: Option<ServiceHostnameFormat>,
 
+    /// Publish gateway service URLs and enable gateway-mediated application routing.
+    #[arg(long, env = "OPENSHELL_ENABLE_GATEWAY_SERVICE_ROUTING", default_value_t = true, action = ArgAction::Set)]
+    enable_gateway_service_routing: bool,
+
     /// Enable plaintext HTTP routing for loopback sandbox service URLs.
     #[arg(
         long,
@@ -341,6 +358,15 @@ struct RunArgs {
     /// and settling its outstanding driver operations. See HA upgrade guidance.
     #[arg(long, env = "OPENSHELL_ENABLE_SANDBOX_UPDATES", default_value_t = false, action = ArgAction::Set)]
     enable_sandbox_updates: bool,
+
+    /// Activate workspace secrets only after every gateway that can serve traffic supports
+    /// them. See the workspace secrets activation guidance.
+    #[arg(long, env = "OPENSHELL_ENABLE_WORKSPACE_SECRETS", default_value_t = false, action = ArgAction::Set)]
+    enable_workspace_secrets: bool,
+
+    /// Allow `RevealSecret` to return workspace secret values to mTLS operators.
+    #[arg(long, env = "OPENSHELL_ENABLE_SECRET_REVEAL", default_value_t = false, action = ArgAction::Set)]
+    enable_secret_reveal: bool,
 }
 
 pub fn command() -> Command {
@@ -408,6 +434,18 @@ fn resolve_legacy_driver_selector_env(args: &mut RunArgs) -> Result<bool> {
     }
 
     Ok(true)
+}
+
+fn in_range(name: &str, value: u32, range: std::ops::RangeInclusive<u32>) -> Result<u32> {
+    if range.contains(&value) {
+        Ok(value)
+    } else {
+        Err(miette::miette!(
+            "{name} must be between {} and {}",
+            range.start(),
+            range.end()
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -553,6 +591,12 @@ fn prepare_server_config_with_drivers(
     {
         config.sandbox_managers = managers;
     }
+    if let Some(audit) = file
+        .as_ref()
+        .and_then(|f| f.openshell.gateway.audit.clone())
+    {
+        config.audit = audit;
+    }
     config.mtls_auth.enabled = mtls_auth_enabled;
     config.mtls_auth.operator_enabled = args.enable_operator_auth;
 
@@ -617,6 +661,7 @@ fn prepare_server_config_with_drivers(
 
     config = config
         .with_database_url(db_url)
+        .with_database_auth(args.db_auth.unwrap_or_default())
         .with_database_max_connections(args.db_max_connections)
         .with_database_lock_max_connections(args.db_lock_max_connections);
     if let Some(driver) = &args.compute_driver {
@@ -634,6 +679,7 @@ fn prepare_server_config_with_drivers(
         )
         .with_server_sans(args.server_sans.clone())
         .with_service_hostname_format(args.service_hostname_format.unwrap_or_default())
+        .with_service_routing(args.enable_gateway_service_routing)
         .with_loopback_service_http(args.enable_loopback_service_http)
         .with_websocket_tunnel(args.enable_websocket_tunnel);
     config
@@ -642,6 +688,8 @@ fn prepare_server_config_with_drivers(
         .map_err(|error| miette::miette!("invalid service routing configuration: {error}"))?;
 
     config.enable_sandbox_updates = args.enable_sandbox_updates;
+    config.workspace_secrets.enabled = args.enable_workspace_secrets;
+    config.workspace_secrets.reveal_enabled = args.enable_secret_reveal;
 
     config.supervisor_app_listener = file
         .as_ref()
@@ -724,6 +772,28 @@ fn prepare_server_config_with_drivers(
         config.image_preparation_timeout_seconds = seconds;
     }
 
+    if let Some(limit) = file
+        .as_ref()
+        .and_then(|f| f.openshell.gateway.mutation_admission_limit_per_caller)
+    {
+        config.mutation_admission_limit_per_caller = in_range(
+            "mutation_admission_limit_per_caller",
+            limit,
+            openshell_core::config::MUTATION_ADMISSION_LIMIT_PER_CALLER_RANGE,
+        )?;
+    }
+
+    if let Some(seconds) = file
+        .as_ref()
+        .and_then(|f| f.openshell.gateway.mutation_replay_window_seconds)
+    {
+        config.mutation_replay_window_seconds = in_range(
+            "mutation_replay_window_seconds",
+            seconds,
+            openshell_core::config::MUTATION_REPLAY_WINDOW_SECONDS_RANGE,
+        )?;
+    }
+
     if let Some(raw) = std::env::var_os("OPENSHELL_PROVISIONING_REPAIR_WINDOW_SECONDS") {
         let raw = raw.to_str().ok_or_else(|| {
             miette::miette!(
@@ -748,6 +818,7 @@ fn prepare_server_config_with_drivers(
     if let Some(issuer) = args.oidc_issuer.clone() {
         config = config.with_oidc(openshell_core::OidcConfig {
             issuer,
+            ca_bundle: args.oidc_ca_bundle.clone(),
             dangerously_allow_insecure_http: args.oidc_dangerously_allow_insecure_http,
             jwks_allowed_origins: args.oidc_jwks_allowed_origins.clone(),
             audience: args.oidc_audience.clone(),
@@ -764,6 +835,30 @@ fn prepare_server_config_with_drivers(
     // the generated TLS bundle so upgrades pick up sandbox auth without a
     // user-authored config file.
     config.gateway_jwt = gateway_jwt;
+    config.spiffe_broker = file
+        .as_ref()
+        .and_then(|file| file.openshell.gateway.spiffe_broker.clone());
+
+    if let Some(kubernetes) = file
+        .as_ref()
+        .and_then(|file| file.openshell.drivers.get("kubernetes"))
+        && kubernetes
+            .get("supervisor_topology")
+            .and_then(toml::Value::as_str)
+            == Some("gateway")
+        && kubernetes
+            .get("provider_spiffe_workload_api_socket_path")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|socket| !socket.is_empty())
+        && config.spiffe_broker.is_none()
+    {
+        return Err(miette::miette!(
+            "shared supervisor SPIFFE grants require spiffe_broker; remove provider_spiffe_workload_api_socket_path from the shared supervisor"
+        ));
+    }
+
+    // Reject invalid broker before startup; gateway state parses it later.
+    crate::spiffe_broker::validate_config(&config).map_err(|error| miette::miette!("{error}"))?;
 
     if let Some(normalized) = normalized_network_trust.as_ref() {
         // Use the same resolver as runtime construction, with the explicit
@@ -879,8 +974,15 @@ async fn run_from_args(
         &prepared.compute_driver,
         &prepared.config.compute_driver_endpoints,
     );
-    let (otlp_export, otlp_error) =
+    let (mut otlp_export, otlp_error) =
         crate::otel_tracing::OtlpExport::start(otlp_config, gateway_resource);
+    let (metrics_recorder, metrics_error) = match (otlp_export.as_mut(), otlp_config) {
+        (Some(export), Some(config)) => match export.start_metrics(config, gateway_resource) {
+            Ok(recorder) => (recorder, None),
+            Err(error) => (None, Some(error)),
+        },
+        _ => (None, None),
+    };
     let (tracing_handle, driver_otlp_error) = crate::tracing_setup::install(
         &EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new(&prepared.config.log_level))
@@ -947,6 +1049,9 @@ async fn run_from_args(
     if has_oidc {
         info!("OIDC authentication enabled");
     }
+    if let Some(error) = metrics_error {
+        error!(%error, "OTLP metrics could not be started; continuing without metric export");
+    }
     if let Some(err) = otlp_error.as_ref().or(driver_otlp_error.as_ref()) {
         error!(
             error = %err,
@@ -962,6 +1067,7 @@ async fn run_from_args(
             ocsf_protocol = otlp.ocsf_protocol().map(tracing::field::display),
             agent_endpoint = otlp.agent_endpoint().map(tracing::field::display),
             agent_protocol = otlp.agent_protocol().map(tracing::field::display),
+            metrics_endpoint = otlp.metrics_endpoint().map(tracing::field::display),
             "OTLP exporting enabled"
         );
     }
@@ -969,9 +1075,34 @@ async fn run_from_args(
         warn!("{UNAUTHENTICATED_USERS_WARNING}");
     }
 
+    if !prepared.config.service_routing.enabled && !prepared.config.supervisor_app_listener.enabled
+    {
+        warn!(
+            "Sandbox service routing disabled: neither gateway routing nor the app listener is enabled"
+        );
+    }
+
+    if prepared.config.supervisor_app_listener.enabled {
+        info!(
+            domain = %prepared.config.supervisor_app_listener.domain(),
+            port = prepared.config.supervisor_app_listener.port,
+            "App-listener-based service routing enabled"
+        );
+    }
+
+    if prepared.config.service_routing.enabled {
+        info!("Gateway-based service routing enabled");
+    }
+
     info!(bind = %prepared.config.bind_address, "Starting OpenShell server");
 
-    let result = Box::pin(run_server(prepared, tracing_log_bus, compute_drivers)).await;
+    let result = Box::pin(run_server(
+        prepared,
+        tracing_log_bus,
+        compute_drivers,
+        metrics_recorder,
+    ))
+    .await;
 
     tracing_handle.shutdown();
 
@@ -1558,6 +1689,11 @@ fn merge_file_into_args(args: &mut RunArgs, file: &GatewayFileSection, matches: 
     {
         args.service_hostname_format = Some(*format);
     }
+    if let Some(enabled) = file.enable_gateway_service_routing
+        && arg_defaulted(matches, "enable_gateway_service_routing")
+    {
+        args.enable_gateway_service_routing = enabled;
+    }
     if let Some(enabled) = file.enable_loopback_service_http
         && arg_defaulted(matches, "enable_loopback_service_http")
     {
@@ -1572,6 +1708,16 @@ fn merge_file_into_args(args: &mut RunArgs, file: &GatewayFileSection, matches: 
         && arg_defaulted(matches, "enable_sandbox_updates")
     {
         args.enable_sandbox_updates = enabled;
+    }
+    if let Some(enabled) = file.enable_workspace_secrets
+        && arg_defaulted(matches, "enable_workspace_secrets")
+    {
+        args.enable_workspace_secrets = enabled;
+    }
+    if let Some(enabled) = file.enable_secret_reveal
+        && arg_defaulted(matches, "enable_secret_reveal")
+    {
+        args.enable_secret_reveal = enabled;
     }
     if let Some(mtls_auth) = &file.mtls_auth
         && arg_defaulted(matches, "enable_mtls_auth")
@@ -1620,6 +1766,9 @@ fn merge_file_into_args(args: &mut RunArgs, file: &GatewayFileSection, matches: 
         if args.oidc_issuer.is_none() && arg_defaulted(matches, "oidc_issuer") {
             args.oidc_issuer = Some(oidc.issuer.clone());
         }
+        if args.oidc_ca_bundle.is_none() && arg_defaulted(matches, "oidc_ca_bundle") {
+            args.oidc_ca_bundle.clone_from(&oidc.ca_bundle);
+        }
         if arg_defaulted(matches, "oidc_dangerously_allow_insecure_http") {
             args.oidc_dangerously_allow_insecure_http = oidc.dangerously_allow_insecure_http;
         }
@@ -1659,6 +1808,12 @@ fn merge_file_into_args(args: &mut RunArgs, file: &GatewayFileSection, matches: 
         && arg_defaulted(matches, "grpc_rate_limit_window_seconds")
     {
         args.grpc_rate_limit_window_seconds = Some(window);
+    }
+    if let Some(mode) = file.database_auth
+        && args.db_auth.is_none()
+        && arg_defaulted(matches, "db_auth")
+    {
+        args.db_auth = Some(mode);
     }
     if let Some(max_connections) = file.database_max_connections
         && args.db_max_connections.is_none()
@@ -1763,7 +1918,7 @@ mod tests {
     use super::{Cli, command};
     use crate::test_environment::Environment;
     use clap::Parser;
-    use openshell_core::config::ServiceHostnameFormat;
+    use openshell_core::config::{DatabaseAuthMode, ServiceHostnameFormat};
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4361,6 +4516,7 @@ compute_driver = "podman"
             .remove("OPENSHELL_OIDC_AUDIENCE")
             .remove("OPENSHELL_OIDC_DANGEROUSLY_ALLOW_INSECURE_HTTP")
             .remove("OPENSHELL_OIDC_JWKS_ALLOWED_ORIGINS")
+            .remove("OPENSHELL_OIDC_CA_BUNDLE")
             .run(|| {
                 let (mut args, matches) =
                     parse_with_args(&["openshell-gateway", "--db-url", "sqlite::memory:"]);
@@ -4368,6 +4524,7 @@ compute_driver = "podman"
                     r#"
 [openshell.gateway.oidc]
 issuer = "https://idp.example.com"
+ca_bundle = "/etc/openshell/oidc-ca.pem"
 audience = "openshell-cli"
 dangerously_allow_insecure_http = true
 jwks_allowed_origins = ["https://keys.example.com"]
@@ -4376,6 +4533,10 @@ jwks_allowed_origins = ["https://keys.example.com"]
                 merge_file_into_args(&mut args, &file.openshell.gateway, &matches);
 
                 assert_eq!(args.oidc_issuer.as_deref(), Some("https://idp.example.com"));
+                assert_eq!(
+                    args.oidc_ca_bundle.as_deref(),
+                    Some(std::path::Path::new("/etc/openshell/oidc-ca.pem"))
+                );
                 assert_eq!(args.oidc_audience, "openshell-cli");
                 assert!(args.oidc_dangerously_allow_insecure_http);
                 assert_eq!(
@@ -4422,6 +4583,33 @@ grpc_rate_limit_window_seconds = 30
 
         assert_eq!(args.grpc_rate_limit_requests, Some(20));
         assert_eq!(args.grpc_rate_limit_window_seconds, Some(30));
+    }
+
+    #[test]
+    fn database_auth_file_and_explicit_overrides() {
+        Environment::new().remove("OPENSHELL_DB_AUTH").run(|| {
+            let file = config_file_from_toml(
+                "[openshell.gateway]\ndatabase_auth = \"azure-workload-identity\"\n",
+            );
+            let (mut args, matches) = parse_with_args(&["openshell-gateway"]);
+            assert_eq!(args.db_auth, None);
+            merge_file_into_args(&mut args, &file.openshell.gateway, &matches);
+            assert_eq!(args.db_auth, Some(DatabaseAuthMode::AzureWorkloadIdentity));
+            let (mut args, matches) =
+                parse_with_args(&["openshell-gateway", "--db-auth", "default"]);
+            merge_file_into_args(&mut args, &file.openshell.gateway, &matches);
+            assert_eq!(args.db_auth, Some(DatabaseAuthMode::Default));
+        });
+        Environment::new()
+            .set("OPENSHELL_DB_AUTH", "default")
+            .run(|| {
+                let file = config_file_from_toml(
+                    "[openshell.gateway]\ndatabase_auth = \"azure-workload-identity\"\n",
+                );
+                let (mut args, matches) = parse_with_args(&["openshell-gateway"]);
+                merge_file_into_args(&mut args, &file.openshell.gateway, &matches);
+                assert_eq!(args.db_auth, Some(DatabaseAuthMode::Default));
+            });
     }
 
     #[test]
@@ -4849,6 +5037,44 @@ enable_loopback_service_http = false
     }
 
     #[test]
+    fn gateway_service_routing_defaults_on_and_honors_config_precedence() {
+        Environment::new()
+            .remove("OPENSHELL_ENABLE_GATEWAY_SERVICE_ROUTING")
+            .run(|| {
+                let (mut args, matches) = parse_with_args(&["openshell-gateway"]);
+                assert!(args.enable_gateway_service_routing);
+                assert!(openshell_core::Config::new(None).service_routing.enabled);
+                let file = config_file_from_toml(
+                    "[openshell.gateway]\nenable_gateway_service_routing = false\n",
+                );
+                merge_file_into_args(&mut args, &file.openshell.gateway, &matches);
+                assert!(!args.enable_gateway_service_routing);
+                let (mut args, matches) = parse_with_args(&[
+                    "openshell-gateway",
+                    "--enable-gateway-service-routing=true",
+                ]);
+                merge_file_into_args(&mut args, &file.openshell.gateway, &matches);
+                assert!(args.enable_gateway_service_routing);
+            });
+        Environment::new()
+            .set("OPENSHELL_ENABLE_GATEWAY_SERVICE_ROUTING", "true")
+            .run(|| {
+                let file = config_file_from_toml(
+                    "[openshell.gateway]\nenable_gateway_service_routing = false\n",
+                );
+                let (mut args, matches) = parse_with_args(&["openshell-gateway"]);
+                merge_file_into_args(&mut args, &file.openshell.gateway, &matches);
+                assert!(args.enable_gateway_service_routing);
+                let (mut args, matches) = parse_with_args(&[
+                    "openshell-gateway",
+                    "--enable-gateway-service-routing=false",
+                ]);
+                merge_file_into_args(&mut args, &file.openshell.gateway, &matches);
+                assert!(!args.enable_gateway_service_routing);
+            });
+    }
+
+    #[test]
     fn server_config_preparation_applies_and_validates_hashed_hostnames() {
         let state = tempfile::tempdir().unwrap();
         let local_tls = tempfile::tempdir().unwrap();
@@ -4860,11 +5086,12 @@ enable_loopback_service_http = false
                 local_tls.path().to_str().unwrap(),
             )
             .remove("OPENSHELL_SERVICE_HOSTNAME_FORMAT")
+            .remove("OPENSHELL_ENABLE_GATEWAY_SERVICE_ROUTING")
             .run(|| {
                 let config_path = state.path().join("gateway.toml");
                 std::fs::write(
                     &config_path,
-                    "[openshell]\nversion = 2\n\n[openshell.gateway]\nname = \"gateway-west\"\nservice_hostname_format = \"hashed\"\n",
+                    "[openshell]\nversion = 2\n\n[openshell.gateway]\nname = \"gateway-west\"\nservice_hostname_format = \"hashed\"\nenable_gateway_service_routing = false\n",
                 )
                 .unwrap();
 
@@ -4881,6 +5108,7 @@ enable_loopback_service_http = false
 
                 let prepared = super::prepare_server_config(&mut args, &matches)
                     .expect("server config is prepared");
+                assert!(!prepared.config.service_routing.enabled);
                 assert_eq!(
                     prepared.config.service_routing_discriminator(),
                     Some("gateway-west")
@@ -5017,6 +5245,83 @@ mem_mib = "not-a-number"
             );
         }
             });
+    }
+
+    fn with_gateway_toml(
+        gateway: &str,
+        check: impl FnOnce(miette::Result<super::ServerStartupConfig>),
+    ) {
+        let state = tempfile::tempdir().unwrap();
+        let tls = tempfile::tempdir().unwrap();
+        Environment::new()
+            .set("XDG_STATE_HOME", state.path().to_str().unwrap())
+            .set("OPENSHELL_LOCAL_TLS_DIR", tls.path().to_str().unwrap())
+            .run(|| {
+                let state = std::path::PathBuf::from(std::env::var_os("XDG_STATE_HOME").unwrap());
+                let config_path = state.join("gateway.toml");
+                std::fs::write(
+                    &config_path,
+                    format!("[openshell]\nversion = 2\n[openshell.gateway]\n{gateway}\n"),
+                )
+                .unwrap();
+                let (mut args, matches) = parse_with_args(&[
+                    "openshell-gateway",
+                    "--config",
+                    config_path.to_str().unwrap(),
+                    "--db-url",
+                    "sqlite::memory:",
+                    "--compute-driver",
+                    "podman",
+                    "--disable-tls",
+                ]);
+                check(super::prepare_server_config(&mut args, &matches));
+            });
+    }
+
+    #[test]
+    fn server_config_prepares_mutation_admission_settings_from_toml() {
+        with_gateway_toml("", |prepared| {
+            let config = prepared.expect("defaults are accepted").config;
+            assert_eq!(config.mutation_admission_limit_per_caller, 1000);
+            assert_eq!(config.mutation_replay_window_seconds, 86_400);
+        });
+        with_gateway_toml(
+            "mutation_admission_limit_per_caller = 5000\nmutation_replay_window_seconds = 3600",
+            |prepared| {
+                let config = prepared.expect("bounded settings are accepted").config;
+                assert_eq!(config.mutation_admission_limit_per_caller, 5000);
+                assert_eq!(config.mutation_replay_window_seconds, 3600);
+            },
+        );
+    }
+
+    #[test]
+    fn server_config_rejects_unbounded_mutation_admission_settings() {
+        for (gateway, message) in [
+            (
+                "mutation_admission_limit_per_caller = 0",
+                "mutation_admission_limit_per_caller must be between 1 and 1000000",
+            ),
+            (
+                "mutation_admission_limit_per_caller = 1000001",
+                "mutation_admission_limit_per_caller must be between 1 and 1000000",
+            ),
+            (
+                "mutation_replay_window_seconds = 59",
+                "mutation_replay_window_seconds must be between 60 and 604800",
+            ),
+            (
+                "mutation_replay_window_seconds = 604801",
+                "mutation_replay_window_seconds must be between 60 and 604800",
+            ),
+        ] {
+            with_gateway_toml(gateway, |prepared| {
+                let Err(error) = prepared else {
+                    panic!("{gateway} must be rejected");
+                };
+                assert!(error.to_string().contains(message), "{error}");
+            });
+        }
     }
 
     #[test]

@@ -12,6 +12,10 @@ use container_engine_support::Engine;
 use podman_support::{Userns, normalize_uid_map, reference_uid_map};
 use testkit::{Context, Error, ResultExt as _};
 
+fn main() -> std::process::ExitCode {
+    testkit::main()
+}
+
 const WORKSPACE_OK: &str = "podman-userns-workspace-ok";
 const WORKSPACE_AND_UID_MAP_PROBE: &str = r#"set -eu
 workload_owner="$(id -u):$(id -g)"
@@ -37,22 +41,11 @@ async fn configured_userns_matches_podman_reference(cx: &mut Context) -> testkit
     let image = testkit::base_image();
     let reference = reference_uid_map(&engine, userns, &image).await?;
 
-    let name = cx.name("pu");
-    cx.track(&name);
     let run = cx
-        .cli([
-            "sandbox",
-            "create",
-            "--name",
-            &name,
-            "--from",
-            &image,
-            "--no-tty",
-            "--",
-            "sh",
-            "-c",
-            WORKSPACE_AND_UID_MAP_PROBE,
-        ])
+        .cli_sandbox("pu")
+        .image(&image)
+        .command(["sh", "-c", WORKSPACE_AND_UID_MAP_PROBE])
+        .run()
         .await?
         .success()
         .context("sandbox can write to its owned workspace and prints its UID map")?;

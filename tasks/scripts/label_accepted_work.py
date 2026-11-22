@@ -1,12 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Shared accepted-work classification; see CONTRIBUTING.md#accepted-work.
+"""Shared accepted-work checks; see CONTRIBUTING.md#accepted-work.
 
-Use is_accepted_work with supplied facts, or check_pr_accepted_work with a
-GitHub API callable. The latter accepts the same path/method/data/pages arguments
-as check_review_readiness._api. Both return a bool; API errors propagate.
-This library has no CLI, label writes, or workflow lifecycle of its own.
+Use is_accepted_work for supplied facts or check_pr_accepted_work and
+check_issue_accepted_work with an API callable. Adapters return bools and
+propagate API errors; they do not write labels.
 """
 
 from __future__ import annotations
@@ -43,6 +42,7 @@ class ClosingIssue:
     accepted: bool
     author: str | None
     assignees: frozenset[str] = frozenset()
+    number: int | None = None
 
 
 def is_accepted_work(
@@ -54,20 +54,43 @@ def is_accepted_work(
     closing_issues: Iterable[ClosingIssue] = (),
 ) -> bool:
     """Classify supplied facts without IO; the triggering actor is irrelevant."""
+    return (
+        acceptance_evidence(
+            author,
+            repository=repository,
+            maintainers=maintainers,
+            permission=permission,
+            closing_issues=closing_issues,
+        )
+        is not None
+    )
+
+
+def acceptance_evidence(
+    author, *, repository, maintainers, permission, closing_issues=()
+):
+    """Return the first qualifying basis, or None when work is not accepted."""
     author = author.lower()
     if author in {login.lower() for login in maintainers}:
-        return True
+        return {"basis": "maintainer"}
     if permission in WRITE_PERMISSIONS:
-        return True
+        return {"basis": "repository_permission", "permission": permission}
     for issue in closing_issues:
         if issue.repository.lower() != repository.lower() or not issue.accepted:
             continue
-        participants = {login.lower() for login in issue.assignees}
-        if issue.author:
-            participants.add(issue.author.lower())
-        if author in participants:
-            return True
-    return False
+        if issue.author and issue.author.lower() == author:
+            return {
+                "basis": "accepted_issue",
+                "issue": issue.number,
+                "relationship": "author",
+            }
+        if author in {login.lower() for login in issue.assignees}:
+            return {
+                "basis": "accepted_issue",
+                "issue": issue.number,
+                "relationship": "assignee",
+            }
+    return None
 
 
 def _closing_issue_facts(
@@ -107,6 +130,7 @@ def _closing_issue_facts(
                 accepted=any(label["name"] == ACCEPTED_LABEL for label in labels),
                 author=issue["user"]["login"] if issue["user"] else None,
                 assignees=frozenset(user["login"] for user in issue["assignees"]),
+                number=reference["number"],
             )
         if not connection["pageInfo"]["hasNextPage"]:
             return
@@ -119,7 +143,14 @@ def _closing_issue_facts(
 def check_pr_accepted_work(
     repository: str, pr: dict, maintainers: set[str], *, api: Callable
 ) -> bool:
-    """Load current facts using a read-only API callable and classify this PR.
+    """Load current facts using a read-only API callable and classify this PR."""
+    return evaluate_pr_accepted_work(repository, pr, maintainers, api=api) is not None
+
+
+def evaluate_pr_accepted_work(
+    repository: str, pr: dict, maintainers: set[str], *, api: Callable
+):
+    """Load current facts and return the qualifying acceptance evidence.
 
     Callers supply maintainer membership from a trusted merged roster. A 404
     collaborator lookup means no repository access; other lookup errors propagate.
@@ -138,10 +169,37 @@ def check_pr_accepted_work(
         except subprocess.CalledProcessError as exc:
             if "(HTTP 404)" not in (exc.stderr or ""):
                 raise
-    return is_accepted_work(
+    return acceptance_evidence(
         author,
         repository=repository,
         maintainers=maintainers,
         permission=permission,
         closing_issues=_closing_issue_facts(repository, pr["number"], api),
     )
+
+
+def check_issue_accepted_work(
+    repository: str, issue: dict, maintainers: set[str], *, api: Callable
+) -> bool:
+    """Check recorded acceptance or the issue author's trusted authority."""
+    if "pull_request" in issue:
+        raise ValueError("Use the PR adapter for pull requests")
+    if not maintainers:
+        raise ValueError("Could not parse any maintainers from MAINTAINERS.md")
+    labels = api(
+        f"repos/{repository}/issues/{issue['number']}/labels?per_page=100", pages=True
+    )
+    if any(label["name"] == ACCEPTED_LABEL for label in labels):
+        return True
+    author = issue["user"]["login"]
+    if author.lower() in {login.lower() for login in maintainers}:
+        return True
+    try:
+        permission = api(
+            f"repos/{repository}/collaborators/{quote(author, safe='')}/permission"
+        )["permission"]
+    except subprocess.CalledProcessError as exc:
+        if "(HTTP 404)" not in (exc.stderr or ""):
+            raise
+        permission = "none"
+    return permission in WRITE_PERMISSIONS

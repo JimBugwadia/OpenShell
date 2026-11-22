@@ -300,12 +300,10 @@ fn load(name: &str) -> Result<Scenario> {
             "{SCENARIOS_ENV} is not set; the environment must publish the scenario expectations"
         ))
     })?;
-    let text = std::fs::read_to_string(&path)
-        .map_err(Error::from_display)
-        .context(format!("read scenario expectations {path}"))?;
-    let document: Value = serde_json::from_str(&text)
-        .map_err(Error::from_display)
-        .context(format!("parse scenario expectations {path}"))?;
+    let text =
+        std::fs::read_to_string(&path).context(format!("read scenario expectations {path}"))?;
+    let document: Value =
+        serde_json::from_str(&text).context(format!("parse scenario expectations {path}"))?;
     scenario_expectations(&document, name)
 }
 
@@ -376,26 +374,13 @@ pub async fn scenario(cx: &Context, name: &str) -> Result {
     let Scenario { device, checks } = load(name)?;
     let driver = compute_driver(cx).await?;
 
-    let sandbox = cx.name("cdi");
-    cx.track(&sandbox);
     let config = json!({driver: {"cdi_devices": [device]}}).to_string();
     let probe = probe_script(&checks);
     let output = cx
-        .cli([
-            "sandbox",
-            "create",
-            "--name",
-            &sandbox,
-            "--no-tty",
-            "--gpu",
-            "1",
-            "--driver-config-json",
-            &config,
-            "--",
-            "sh",
-            "-c",
-            &probe,
-        ])
+        .cli_sandbox("cdi")
+        .args(["--gpu", "1", "--driver-config-json", &config])
+        .command(["sh", "-c", &probe])
+        .run()
         .await?;
 
     let output = output

@@ -46,7 +46,6 @@ Authentication, multitenancy, gateway interceptors, FIPS compliance, and other e
 
 | Name | GitHub ID | Company/Organization |
 | --- | --- | --- |
-| Akram Ben Aissi | [@akram](https://github.com/akram) | Red Hat |
 | Derek Carr | [@derekwaynecarr](https://github.com/derekwaynecarr) | Red Hat |
 | Seth Jennings | [@sjenning](https://github.com/sjenning) | Red Hat |
 
@@ -88,7 +87,6 @@ Authentication, authorization, credential protection, policy integrity/signed po
 
 | Name | GitHub ID | Company/Organization |
 | --- | --- | --- |
-| Gordon Sim | [@grs](https://github.com/grs) | Red Hat |
 | Kris Hicks | [@krishicks](https://github.com/krishicks) | NVIDIA |
 | Seth Jennings | [@sjenning](https://github.com/sjenning) | Red Hat |
 
@@ -129,7 +127,6 @@ Extension APIs and integration points, including consistency, general-purpose de
 
 | Name | GitHub ID | Company/Organization |
 | --- | --- | --- |
-| Artem Lytvyn | [@letv1nnn](https://github.com/letv1nnn) | Independent |
 | Drew Newberry | [@drew](https://github.com/drew) | NVIDIA |
 | Matthew Grossman | [@matthewgrossman](https://github.com/matthewgrossman) | NVIDIA |
 | Piotr Mlocek | [@pimlock](https://github.com/pimlock) | NVIDIA |
@@ -151,11 +148,7 @@ Kubernetes operator development, custom resource definitions (CRDs), deployment 
 | --- | --- | --- |
 | Divesh Chowdary | [@FrostGod](https://github.com/FrostGod) | NVIDIA |
 | Drew Newberry | [@drew](https://github.com/drew) | NVIDIA |
-| Ignas Baranauskas | [@Ygnas](https://github.com/Ygnas) | Red Hat |
-| Jorge Garcia Oncins | [@jgarciao](https://github.com/jgarciao) | Red Hat |
 | Kris Hicks | [@krishicks](https://github.com/krishicks) | NVIDIA |
-| Krzysztof Malczuk | [@2000krysztof](https://github.com/2000krysztof) | Red Hat |
-| Mark Campbell | [@Bobbins228](https://github.com/Bobbins228) | Red Hat |
 | Mrunal Patel | [@mrunalp](https://github.com/mrunalp) | Red Hat |
 | Taylor Mutch | [@TaylorMutch](https://github.com/TaylorMutch) | NVIDIA |
 
@@ -170,7 +163,7 @@ Model Context Protocol (MCP) support, server and client implementations, and sta
 
 ### topic:networking
 
-General network transport, connectivity, and proxy behavior not covered by the more specialized L7 category.
+General network transport, connectivity, and proxy behavior.
 
 | Name | GitHub ID | Company/Organization |
 | --- | --- | --- |
@@ -186,11 +179,8 @@ Logging, metrics, tracing, telemetry, dashboards, event correlation, and the col
 
 | Name | GitHub ID | Company/Organization |
 | --- | --- | --- |
-| Artem Lytvyn | [@letv1nnn](https://github.com/letv1nnn) | Independent |
-| Gaizka Menendez | [@gmenher](https://github.com/gmenher) | Red Hat |
 | Kris Hicks | [@krishicks](https://github.com/krishicks) | NVIDIA |
 | Matthew Grossman | [@matthewgrossman](https://github.com/matthewgrossman) | NVIDIA |
-| Roland Huss | [@rhuss](https://github.com/rhuss) | Red Hat |
 | Taylor Mutch | [@TaylorMutch](https://github.com/TaylorMutch) | NVIDIA |
 
 ### topic:operability
@@ -236,13 +226,42 @@ High availability, failure recovery, retries, graceful degradation, fault tolera
 | Piotr Mlocek | [@pimlock](https://github.com/pimlock) | NVIDIA |
 | Taylor Mutch | [@TaylorMutch](https://github.com/TaylorMutch) | NVIDIA |
 
-### topic:sdk
+### topic:sdk:go
 
-Software Development Kit (SDK) creation, maintenance, language bindings, and distribution.
+Go SDK implementation, maintenance, interfaces, and distribution.
 
 | Name | GitHub ID | Company/Organization |
 | --- | --- | --- |
-| Krzysztof Malczuk | [@2000krysztof](https://github.com/2000krysztof) | Red Hat |
+| Max Dubrinsky | [@maxdubrinsky](https://github.com/maxdubrinsky) | Gretel |
+| Simon Scatton | [@SDAChess](https://github.com/SDAChess) | NVIDIA |
+| Taylor Mutch | [@TaylorMutch](https://github.com/TaylorMutch) | NVIDIA |
+
+### topic:sdk:python
+
+Python SDK implementation, maintenance, interfaces, and distribution.
+
+| Name | GitHub ID | Company/Organization |
+| --- | --- | --- |
+| Max Dubrinsky | [@maxdubrinsky](https://github.com/maxdubrinsky) | Gretel |
+| Simon Scatton | [@SDAChess](https://github.com/SDAChess) | NVIDIA |
+| Taylor Mutch | [@TaylorMutch](https://github.com/TaylorMutch) | NVIDIA |
+
+### topic:sdk:rust
+
+Rust SDK implementation, maintenance, interfaces, and distribution.
+
+| Name | GitHub ID | Company/Organization |
+| --- | --- | --- |
+| Max Dubrinsky | [@maxdubrinsky](https://github.com/maxdubrinsky) | Gretel |
+| Simon Scatton | [@SDAChess](https://github.com/SDAChess) | NVIDIA |
+| Taylor Mutch | [@TaylorMutch](https://github.com/TaylorMutch) | NVIDIA |
+
+### topic:sdk:typescript
+
+TypeScript SDK implementation, maintenance, interfaces, and distribution.
+
+| Name | GitHub ID | Company/Organization |
+| --- | --- | --- |
 | Max Dubrinsky | [@maxdubrinsky](https://github.com/maxdubrinsky) | Gretel |
 | Simon Scatton | [@SDAChess](https://github.com/SDAChess) | NVIDIA |
 | Taylor Mutch | [@TaylorMutch](https://github.com/TaylorMutch) | NVIDIA |
@@ -254,10 +273,8 @@ Vulnerability management, static/dynamic analysis, FSR (Functional Security Requ
 | Name | GitHub ID | Company/Organization |
 | --- | --- | --- |
 | Adrien Langou | [@alangou](https://github.com/alangou) | NVIDIA |
-| Christian Zaccaria | [@ChristianZaccaria](https://github.com/ChristianZaccaria) | Red Hat |
 | Jim Meyer | [@purp](https://github.com/purp) | NVIDIA |
 | John T. Myers | [@johntmyers](https://github.com/johntmyers) | NVIDIA |
-| Krzysztof Malczuk | [@2000krysztof](https://github.com/2000krysztof) | Red Hat |
 | Russell Bryant | [@russellb](https://github.com/russellb) | Red Hat |
 | Simon Scatton | [@SDAChess](https://github.com/SDAChess) | NVIDIA |
 
@@ -268,9 +285,6 @@ Unit, integration, regression, conformance, and end-to-end testing, including te
 | Name | GitHub ID | Company/Organization |
 | --- | --- | --- |
 | Evan Lezar | [@elezar](https://github.com/elezar) | NVIDIA |
-| Gaizka Menendez | [@gmenher](https://github.com/gmenher) | Red Hat |
-| Jorge Garcia Oncins | [@jgarciao](https://github.com/jgarciao) | Red Hat |
-| Mark Campbell | [@Bobbins228](https://github.com/Bobbins228) | Red Hat |
 | Matthew Grossman | [@matthewgrossman](https://github.com/matthewgrossman) | NVIDIA |
 | Simon Scatton | [@SDAChess](https://github.com/SDAChess) | NVIDIA |
 
@@ -280,5 +294,3 @@ CLI command interface and flags, help text, error messages and exit codes, human
 
 | Name | GitHub ID | Company/Organization |
 | --- | --- | --- |
-| Artem Lytvyn | [@letv1nnn](https://github.com/letv1nnn) | Independent |
-| Roland Huss | [@rhuss](https://github.com/rhuss) | Red Hat |

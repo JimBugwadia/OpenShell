@@ -15,11 +15,14 @@ mod websocket;
 
 use std::time::Duration;
 
-use testkit::{Error, Result, ResultExt as _};
+use testkit::{Result, ResultExt as _};
 use tokio::net::TcpListener;
 
 pub use http::{HttpRecorder, Request};
 pub use websocket::WebSocketRecorder;
+
+/// The name a sandbox reaches these servers by.
+pub const TEST_HOST: &str = "host.openshell.internal";
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
 const WAIT_INTERVAL: Duration = Duration::from_millis(100);
@@ -29,11 +32,9 @@ const MAX_REQUEST: usize = 1024 * 1024;
 async fn bind() -> Result<(TcpListener, u16)> {
     let listener = TcpListener::bind(("0.0.0.0", 0))
         .await
-        .map_err(|error| Error::from_error(&error))
         .context("bind a host server")?;
     let port = listener
         .local_addr()
-        .map_err(|error| Error::from_error(&error))
         .context("read the host server's address")?
         .port();
     Ok((listener, port))
