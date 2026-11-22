@@ -19,8 +19,19 @@ rules:
     resources: ["openshellsandboxtemplates"]
     verbs: ["get", "list", "watch", "patch"]
   - apiGroups: ["openshell.ai"]
-    resources: ["openshellsandboxes/status", "openshellsandboxtemplates/status"]
+    resources: ["openshellproviders"]
+    verbs: ["list", "watch", "patch"]
+  - apiGroups: ["openshell.ai"]
+    resources:
+      - "openshellsandboxes/status"
+      - "openshellsandboxtemplates/status"
+      - "openshellproviders/status"
     verbs: ["patch"]
+  # Providers reference credentials in Secrets. The controller reads them and
+  # sends their values to the gateway; it never writes Secrets.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

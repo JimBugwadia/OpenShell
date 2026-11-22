@@ -80,13 +80,37 @@ target/debug/openshell-k8s-controller \
   --tls-ca "$MTLS/ca.crt" --tls-cert "$MTLS/tls.crt" --tls-key "$MTLS/tls.key"
 ```
 
-### Step 1: declare a template and a sandbox
+### Step 1: declare a provider, a template, and a sandbox
 
-The template holds the reviewed workload: its image and settings. The sandbox
-names the template. Both live in Git in a real deployment.
+The provider holds the agent's GitHub credential by reference to a Secret. The
+template holds the reviewed workload: its image and settings. The sandbox names
+the template and the provider. All three live in Git in a real deployment; the
+Secret comes from your secret manager.
+
+The provider type must exist in the workspace, so import the example GitHub
+profile first. Then store a read-only GitHub token in a Secret:
+
+```shell
+openshell provider profile import -f providers/github.yaml --workspace agents
+kubectl create secret generic github-token -n agents \
+  --from-literal=token="<your-github-token>"
+```
 
 ```shell
 cat <<EOF | kubectl apply -f -
+apiVersion: openshell.ai/v1alpha1
+kind: OpenShellProvider
+metadata:
+  name: github
+  namespace: agents
+spec:
+  type: github
+  credentials:
+    - name: GITHUB_TOKEN
+      secretKeyRef:
+        name: github-token
+        key: token
+---
 apiVersion: openshell.ai/v1alpha1
 kind: OpenShellSandboxTemplate
 metadata:
@@ -105,15 +129,20 @@ metadata:
 spec:
   workloadTemplate:
     name: demo-agent
+  providers: [github]
 EOF
+kubectl wait --for=condition=Ready osprov/github -n agents --timeout=60s
 kubectl wait --for=condition=Ready ossbxt/demo-agent -n agents --timeout=60s
 kubectl wait --for=condition=Ready ossbx/support-agent -n agents --timeout=300s
-kubectl get ossbxt,ossbx -n agents
+kubectl get osprov,ossbxt,ossbx -n agents
 ```
 
 Expected:
 
 ```text
+NAME                                     TYPE     PHASE   REASON    AGE
+openshellprovider.openshell.ai/github    github   Ready   Applied   30s
+
 NAME                                                  PHASE   REASON      REVISION        AGE
 openshellsandboxtemplate.openshell.ai/demo-agent      Ready   Published   demo-agent-r1   30s
 
@@ -125,8 +154,12 @@ The `SANDBOX` column is the sandbox's name in the gateway, so you can pass it to
 `openshell sandbox` commands. Add `-o wide` to also show the template revision
 and the gateway sandbox ID.
 
-The controller publishes the template to the gateway as revision
-`demo-agent-r1`, and the sandbox records it in `status.templateRevision`.
+The controller creates the gateway provider `github` from the Secret, publishes
+the template to the gateway as revision `demo-agent-r1`, and the sandbox
+records the revision in `status.templateRevision`. To rotate the token, update
+the Secret; the controller applies the new value to the gateway provider, and
+`openshell provider get github --workspace agents` shows the change without
+showing the value.
 
 Point out: `kubectl wait --for=condition=Ready` works, so Argo CD and Flux can
 assess health without custom scripts.
@@ -216,12 +249,13 @@ kubectl -n kube-system exec etcd-openshell-crd-demo-control-plane -- etcdctl \
 Expected: about 2,800 bytes. A Ready sandbox causes no further writes; the
 script checks this by watching the resource for 45 seconds.
 
-### Step 8: delete the sandbox and the template
+### Step 8: delete the sandbox, the provider, and the template
 
 ```shell
 kubectl get ossbx support-agent -n agents -o jsonpath='{.metadata.finalizers}{"\n"}'
 kubectl delete ossbx support-agent -n agents
 openshell sandbox get "$NAME" --workspace agents
+kubectl delete osprov github -n agents
 kubectl delete ossbxt demo-agent -n agents
 openshell sandbox template list --workspace agents
 ```
@@ -229,7 +263,8 @@ openshell sandbox template list --workspace agents
 Expected: the sandbox delete waits for the gateway to remove the sandbox, so
 `openshell sandbox get` reports that it isn't found. Deleting the template
 removes both of its gateway revisions, so the last command lists no
-`demo-agent` revisions. Delete the template after its sandboxes.
+`demo-agent` revisions. Delete the provider and the template after their
+sandboxes: the gateway refuses to delete a provider that a sandbox uses.
 
 ### Clean up
 

@@ -50,8 +50,10 @@ is rejected at admission. Omitting both uses the gateway's default image.
 
 The spec also takes `providers` (gateway provider names), `command` (the
 agent's start command; the image's own command never runs), `restartPolicy`
-(`Never`, `OnFailure`, or `Always`), and `serviceExposures`. The controller
-doesn't create policies or providers, and gateway default governance applies.
+(`Never`, `OnFailure`, or `Always`), and `serviceExposures`. A provider name
+can be an `OpenShellProvider` in the same namespace or a provider that already
+exists in the gateway workspace. The controller doesn't create policies, and
+gateway default governance applies.
 The controller records these inputs in the journal so a replayed create sends
 the original request. The entire sandbox spec is immutable through a CEL
 admission transition rule. Reapplying equivalent content is allowed. Change the workload by creating a
@@ -136,6 +138,54 @@ the current generation.
 - Deleting the template resource deletes all its revisions. Sandboxes keep the
   workload they were created with. Old revisions otherwise stay until then.
 - The controller identity must be a workspace admin to publish templates.
+
+## Providers
+
+An `OpenShellProvider` (short name `osprov`) declares a gateway provider. Its
+credentials and secret refresh material reference keys in Kubernetes Secrets in
+the same namespace, so no value appears in the resource.
+
+```yaml
+apiVersion: openshell.ai/v1alpha1
+kind: OpenShellProvider
+metadata:
+  name: github
+  namespace: agents
+spec:
+  type: github
+  credentials:
+    - name: GITHUB_TOKEN
+      secretKeyRef:
+        name: github-token
+        key: token
+```
+
+- The controller creates the gateway provider with the resource's name,
+  labeled `kubernetes.openshell.ai/uid=<resource UID>`, so sandboxes list it in
+  `providers` by that name. A provider with that name and another owner blocks
+  the resource with reason `NameCollision`; it's never adopted.
+- `type` names a provider type profile imported into the workspace. Set
+  `globalProfile: true` to use the gateway's global catalog instead. Both
+  fields are immutable; the rest of the spec is mutable.
+- The controller watches the referenced Secrets. Updating a Secret, or the
+  spec, applies the provider again: credentials and `config` keys the resource
+  no longer declares are removed, and keys set outside the resource are kept.
+- `refresh` configures gateway-owned refresh for a credential that the gateway
+  mints, with a `strategy` (`OAuth2RefreshToken`, `OAuth2ClientCredentials`,
+  `GoogleServiceAccountJwt`, `AwsStsAssumeRole`, or `GithubAppInstallation`)
+  and `material`. Each material item sets an inline, non-secret `value` or a
+  `secretKeyRef`; only Secret values are sent as secret material. A refreshed
+  credential can't also be listed in `credentials`.
+- Status records `phase`, `reason`, a `Ready` condition, the resource version
+  of each referenced Secret, and the keys the controller set. It never records
+  a value. A missing Secret or key blocks the resource with reason
+  `SecretNotFound`, and a gateway refusal with `ProviderRejected`.
+- Deleting the resource deletes the gateway provider if this resource owns
+  it. The gateway refuses while sandboxes use the provider, and the resource
+  reports `ProviderInUse` until they're gone.
+- The controller needs `get`, `list`, and `watch` on Secrets in its namespace.
+  Anyone who can create an `OpenShellProvider` can have the controller send any
+  Secret in that namespace to the gateway, so keep unrelated Secrets elsewhere.
 
 ## Status
 

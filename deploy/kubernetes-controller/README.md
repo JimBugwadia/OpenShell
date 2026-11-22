@@ -1,11 +1,12 @@
 # OpenShell Kubernetes controller prototype
 
 This package contains the namespaced RBAC and a sample `OpenShellSandboxTemplate`
-and `OpenShellSandbox`. The
+and `OpenShellSandbox`. An `OpenShellProvider` declares a gateway provider whose
+credentials come from Kubernetes Secrets. The
 controller is run from the source checkout with Cargo; it intentionally has no
 Deployment or container image because this prototype does not publish a
 controller image. Install its CRD from the executable so the served schema and
-the controller stay in sync; `--print-crd` prints both CRDs.
+the controller stay in sync; `--print-crd` prints all three CRDs.
 
 For a step-by-step walkthrough on a local kind cluster, see the
 [Kubernetes sandbox CRD example](../../examples/kubernetes-sandbox-crd/README.md).
@@ -16,8 +17,9 @@ For a step-by-step walkthrough on a local kind cluster, see the
 - Rust toolchain and Cargo from the repository's `rust-toolchain.toml`.
 - An OpenShell gateway reachable from the controller process.
 - A controller identity that is a workspace admin in the gateway workspace, so
-  it can publish template revisions. A sandbox can instead name a workload
-  template that already exists in the gateway.
+  it can publish template revisions and manage providers. A sandbox can
+  instead name a workload template or provider that already exists in the
+  gateway.
 
 The controller watches only the namespace, workspace, and gateway URL passed
 at startup. Configure one controller process per binding. It uses the current
@@ -50,10 +52,13 @@ kubectl --context "$KUBE_CONTEXT" apply \
 ```
 
 The included RoleBinding grants the service account namespaced `list`, `watch`,
-and `patch` access to `OpenShellSandbox` objects and `patch` access to their
-status subresource. It grants no permissions outside
-`openshell-sandbox`, and does not grant create/delete or access to other
-resources. The CRD is cluster-scoped; installing or upgrading it requires a
+and `patch` access to the three OpenShell kinds, `patch` access to their
+status subresources, and `get`, `list`, and `watch` access to Secrets, so it
+can read provider credentials and notice rotation. It grants no permissions
+outside `openshell-sandbox`, never grants writes to Secrets, and does not grant
+create/delete or access to other resources. Anyone who can create an
+`OpenShellProvider` in the namespace can have the controller send any Secret
+in that namespace to the gateway, so keep unrelated Secrets elsewhere. The CRD is cluster-scoped; installing or upgrading it requires a
 separate administrator identity. Do not grant the controller cluster-wide
 permissions to install the CRD.
 
@@ -122,8 +127,14 @@ family and generation, and reports it in `status.currentRevision`. Callers
 that create sandboxes on demand can name the family, such as
 `openshell sandbox create --template support-agent`, and the gateway uses the
 latest revision. Deleting the template resource deletes its revisions;
-sandboxes already created from them keep the workload they started with. The CR intentionally
-has no command or restart-policy overrides; gateway/template defaults apply.
+sandboxes already created from them keep the workload they started with.
+
+An `OpenShellProvider` (short name `osprov`) creates a gateway provider with
+the resource's name, so a sandbox lists it in `providers`. Each credential
+names a key in a Secret in the same namespace; the controller reads the value
+and sends it to the gateway, and status records only Secret resource versions.
+Updating a referenced Secret updates the gateway provider. The provider's
+`type` is immutable.
 A `Ready` condition with status `True` means the gateway reports phase
 `Ready`; it is not an application-level health or readiness check. The
 condition's `lastTransitionTime` records only when its status last changed, so

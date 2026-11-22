@@ -8,6 +8,7 @@ use kube::{CustomResource, CustomResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod provider;
 pub mod template;
 
 pub const FINALIZER: &str = "openshell.ai/gateway-cleanup";
@@ -428,9 +429,17 @@ pub fn template_crd() -> Result<serde_json::Value, serde_json::Error> {
     Ok(value)
 }
 
+/// The provider CRD. Its spec is mutable, except for its type; the controller
+/// applies each change to the gateway provider.
+pub fn provider_crd() -> Result<serde_json::Value, serde_json::Error> {
+    let mut value = serde_json::to_value(provider::OpenShellProvider::crd())?;
+    map_conditions(&mut value["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]);
+    Ok(value)
+}
+
 /// Every CRD the controller serves, in install order.
 pub fn crds() -> Result<Vec<serde_json::Value>, serde_json::Error> {
-    Ok(vec![crd()?, template_crd()?])
+    Ok(vec![crd()?, template_crd()?, provider_crd()?])
 }
 
 fn map_conditions(schema: &mut serde_json::Value) {

@@ -6,6 +6,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use clap::Parser;
 use futures::StreamExt;
+use k8s_openapi::api::core::v1::Secret;
 use kube::{
     Api, Client, ResourceExt,
     api::{Patch, PatchParams},
@@ -13,12 +14,18 @@ use kube::{
 use kube_runtime::{
     Controller,
     controller::{self, Action},
+    reflector::ObjectRef,
     watcher,
 };
 use openshell_k8s_controller::{
     Binding, FINALIZER, Gateway, GatewayError, Missing, OpenShellSandbox, Outcome, Persistence,
     PersistenceError, RemoteSandbox, RestartPolicy, SandboxInputs, SandboxStatus,
-    ServiceAuthorization, advance, crds, next_observation, sync_conditions,
+    ServiceAuthorization, advance, crds, next_observation,
+    provider::{
+        self, Desired, OpenShellProvider, ProviderGateway, RefreshStrategy, SecretData,
+        SecretReader, SecretsError, Step,
+    },
+    sync_conditions,
     template::{
         FAMILY_LABEL, GENERATION_LABEL, OpenShellSandboxTemplate, Revision, SOURCE_UID_LABEL,
         TemplateGateway, apply_publish, revision_name,
@@ -29,10 +36,12 @@ use openshell_sdk::{
     raw::{
         CreateSandboxRequest, DeleteSandboxRequest, GetSandboxRequest,
         proto::{
-            self, CreateSandboxTemplateRequest, DeleteSandboxTemplateRequest,
-            GetSandboxTemplateRequest, ListSandboxTemplatesRequest, SandboxPhase, SandboxResources,
-            SandboxWorkloadConfig, SandboxWorkloadTemplate, SandboxWorkloadTemplateSpec,
-            datamodel::v1::ObjectMeta,
+            self, ConfigureProviderRefreshRequest, CreateProviderRequest,
+            CreateSandboxTemplateRequest, DeleteProviderRefreshRequest, DeleteProviderRequest,
+            DeleteSandboxTemplateRequest, GetProviderRequest, GetSandboxTemplateRequest,
+            ListSandboxTemplatesRequest, SandboxPhase, SandboxResources, SandboxWorkloadConfig,
+            SandboxWorkloadTemplate, SandboxWorkloadTemplateSpec, UpdateProviderRequest,
+            datamodel::v1::{ObjectMeta, Provider},
         },
     },
 };
@@ -409,12 +418,264 @@ impl TemplateGateway for RpcGateway {
     }
 }
 
+fn refresh_strategy(strategy: RefreshStrategy) -> proto::ProviderCredentialRefreshStrategy {
+    match strategy {
+        RefreshStrategy::OAuth2RefreshToken => {
+            proto::ProviderCredentialRefreshStrategy::Oauth2RefreshToken
+        }
+        RefreshStrategy::OAuth2ClientCredentials => {
+            proto::ProviderCredentialRefreshStrategy::Oauth2ClientCredentials
+        }
+        RefreshStrategy::GoogleServiceAccountJwt => {
+            proto::ProviderCredentialRefreshStrategy::GoogleServiceAccountJwt
+        }
+        RefreshStrategy::AwsStsAssumeRole => {
+            proto::ProviderCredentialRefreshStrategy::AwsStsAssumeRole
+        }
+        RefreshStrategy::GithubAppInstallation => {
+            proto::ProviderCredentialRefreshStrategy::GithubAppInstallation
+        }
+    }
+}
+
+/// Provider fields for a create or update. Removed keys are sent empty, which
+/// the gateway treats as a delete.
+fn provider_message(desired: &Desired) -> Provider {
+    fn removed(keys: &[String]) -> impl Iterator<Item = (String, String)> + '_ {
+        keys.iter().map(|key| (key.clone(), String::new()))
+    }
+    Provider {
+        metadata: Some(ObjectMeta {
+            name: desired.name.clone(),
+            labels: HashMap::from([(SOURCE_UID_LABEL.into(), desired.source_uid.clone())]),
+            ..Default::default()
+        }),
+        r#type: desired.type_.clone(),
+        profile_workspace: if desired.global_profile {
+            String::new()
+        } else {
+            desired.workspace.clone()
+        },
+        credentials: desired
+            .credentials
+            .clone()
+            .into_iter()
+            .chain(removed(&desired.removed_credentials))
+            .collect(),
+        config: desired
+            .config
+            .clone()
+            .into_iter()
+            .chain(removed(&desired.removed_config))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+/// Refusals that precede any gateway side effect.
+fn refused(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        tonic::Code::InvalidArgument
+            | tonic::Code::NotFound
+            | tonic::Code::FailedPrecondition
+            | tonic::Code::PermissionDenied
+            | tonic::Code::Unauthenticated
+    )
+}
+
+impl RpcGateway {
+    /// The provider's owner label, `Ok(None)` when it doesn't exist.
+    async fn provider_owner(
+        &self,
+        workspace: &str,
+        name: &str,
+    ) -> Result<Option<(String, String)>, GatewayError> {
+        let result = tokio::time::timeout(
+            CALL_TIMEOUT,
+            self.client.raw_grpc().get_provider(GetProviderRequest {
+                workspace_scope: Some(proto::workspace_selector(workspace)),
+                name: name.into(),
+            }),
+        )
+        .await
+        .map_err(|_| GatewayError::Uncertain)?;
+        match result {
+            Ok(response) => {
+                let provider = response
+                    .into_inner()
+                    .provider
+                    .ok_or(GatewayError::Uncertain)?;
+                let owner = provider
+                    .metadata
+                    .and_then(|m| m.labels.get(SOURCE_UID_LABEL).cloned())
+                    .unwrap_or_default();
+                Ok(Some((owner, provider.r#type)))
+            }
+            Err(status) if status.code() == tonic::Code::NotFound => Ok(None),
+            Err(_) => Err(GatewayError::Uncertain),
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderGateway for RpcGateway {
+    async fn apply(&self, desired: &Desired) -> Result<(), GatewayError> {
+        let workspace = Some(proto::workspace_selector(&desired.workspace));
+        let mut grpc = self.client.raw_grpc();
+        let result = match self
+            .provider_owner(&desired.workspace, &desired.name)
+            .await?
+        {
+            None => {
+                tokio::time::timeout(
+                    CALL_TIMEOUT,
+                    grpc.create_provider(CreateProviderRequest {
+                        workspace_scope: workspace.clone(),
+                        provider: Some(provider_message(desired)),
+                        request_id: String::new(),
+                    }),
+                )
+                .await
+            }
+            Some((owner, _)) if owner != desired.source_uid => return Err(GatewayError::Collision),
+            Some((_, kind)) if !kind.eq_ignore_ascii_case(&desired.type_) => {
+                return Err(GatewayError::Rejected);
+            }
+            Some(_) => {
+                tokio::time::timeout(
+                    CALL_TIMEOUT,
+                    grpc.update_provider(UpdateProviderRequest {
+                        workspace_scope: workspace.clone(),
+                        provider: Some(provider_message(desired)),
+                        request_id: String::new(),
+                        ..Default::default()
+                    }),
+                )
+                .await
+            }
+        }
+        .map_err(|_| GatewayError::Uncertain)?;
+        match result {
+            Ok(_) => {}
+            // A concurrent create; the next reconcile checks its owner.
+            Err(status) if status.code() == tonic::Code::AlreadyExists => {
+                return Err(GatewayError::Uncertain);
+            }
+            Err(status) if refused(&status) => return Err(GatewayError::Rejected),
+            Err(_) => return Err(GatewayError::Uncertain),
+        }
+        for credential in &desired.retired_refresh {
+            tokio::time::timeout(
+                CALL_TIMEOUT,
+                grpc.delete_provider_refresh(DeleteProviderRefreshRequest {
+                    workspace_scope: workspace.clone(),
+                    provider: desired.name.clone(),
+                    credential_key: credential.clone(),
+                    allow_missing: true,
+                    request_id: String::new(),
+                }),
+            )
+            .await
+            .map_err(|_| GatewayError::Uncertain)?
+            .map_err(|status| {
+                if refused(&status) {
+                    GatewayError::Rejected
+                } else {
+                    GatewayError::Uncertain
+                }
+            })?;
+        }
+        for refresh in &desired.refresh {
+            tokio::time::timeout(
+                CALL_TIMEOUT,
+                grpc.configure_provider_refresh(ConfigureProviderRefreshRequest {
+                    workspace_scope: workspace.clone(),
+                    provider: desired.name.clone(),
+                    credential_key: refresh.credential.clone(),
+                    strategy: refresh_strategy(refresh.strategy).into(),
+                    material: refresh.material.clone().into_iter().collect(),
+                    secret_material_keys: refresh.secret_keys.clone(),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(|_| GatewayError::Uncertain)?
+            .map_err(|status| {
+                if refused(&status) {
+                    GatewayError::Rejected
+                } else {
+                    GatewayError::Uncertain
+                }
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn remove(
+        &self,
+        workspace: &str,
+        name: &str,
+        source_uid: &str,
+    ) -> Result<(), GatewayError> {
+        match self.provider_owner(workspace, name).await? {
+            None => return Ok(()),
+            Some((owner, _)) if owner != source_uid => return Err(GatewayError::Collision),
+            Some(_) => {}
+        }
+        let result = tokio::time::timeout(
+            CALL_TIMEOUT,
+            self.client
+                .raw_grpc()
+                .delete_provider(DeleteProviderRequest {
+                    workspace_scope: Some(proto::workspace_selector(workspace)),
+                    name: name.into(),
+                    allow_missing: true,
+                    request_id: String::new(),
+                }),
+        )
+        .await
+        .map_err(|_| GatewayError::Uncertain)?;
+        match result {
+            Ok(_) => Ok(()),
+            // The gateway refuses to delete a provider that sandboxes use.
+            Err(status) if status.code() == tonic::Code::FailedPrecondition => {
+                Err(GatewayError::Rejected)
+            }
+            Err(_) => Err(GatewayError::Uncertain),
+        }
+    }
+}
+
+/// Reads Secrets in the controller's namespace.
+struct KubeSecrets {
+    api: Api<Secret>,
+}
+
+#[async_trait]
+impl SecretReader for KubeSecrets {
+    async fn read(&self, name: &str) -> Result<Option<SecretData>, SecretsError> {
+        let secret = self.api.get_opt(name).await.map_err(|_| SecretsError)?;
+        Ok(secret.map(|secret| SecretData {
+            resource_version: secret.resource_version().unwrap_or_default(),
+            data: secret
+                .data
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(key, value)| (key, value.0))
+                .collect(),
+        }))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 enum Error {
     #[error("Kubernetes request failed")]
     Kube(#[from] kube::Error),
     #[error("Kubernetes persistence failed")]
     Persistence(#[from] PersistenceError),
+    #[error("reading a Secret failed")]
+    Secrets(#[from] SecretsError),
     #[error("resource lacks a valid UUID identity or generation")]
     Identity,
 }
@@ -422,8 +683,11 @@ enum Error {
 struct Context {
     api: Api<OpenShellSandbox>,
     templates: Api<OpenShellSandboxTemplate>,
+    providers: Api<OpenShellProvider>,
+    secrets: Arc<dyn SecretReader>,
     gateway: Arc<dyn Gateway>,
     template_gateway: Arc<dyn TemplateGateway>,
+    provider_gateway: Arc<dyn ProviderGateway>,
     gateway_url: String,
     workspace: String,
     namespace: String,
@@ -720,6 +984,71 @@ async fn reconcile_template(
     Ok(Action::requeue(delay))
 }
 
+/// Apply a provider's spec and Secrets to its gateway provider.
+async fn reconcile_provider(
+    object: Arc<OpenShellProvider>,
+    context: Arc<Context>,
+) -> Result<Action, Error> {
+    let has_finalizer = object.finalizers().iter().any(|f| f == FINALIZER);
+    let deleting = object.metadata.deletion_timestamp.is_some();
+    if !has_finalizer {
+        if deleting {
+            return Ok(Action::await_change());
+        }
+        let mut finalizers = object.finalizers().to_vec();
+        finalizers.push(FINALIZER.into());
+        set_finalizers(&context.providers, object.as_ref(), finalizers).await?;
+        return Ok(Action::requeue(Duration::from_secs(1)));
+    }
+    let now = unix_now()?;
+    let name = object.name_any();
+    let uid = object.uid().ok_or(Error::Identity)?;
+    let generation = object.metadata.generation.ok_or(Error::Identity)?;
+    let mut status = object.status.clone().unwrap_or_default();
+    let step = provider::sync(
+        &object.spec,
+        &mut status,
+        generation,
+        &provider::Source {
+            workspace: &context.workspace,
+            name: &name,
+            uid: &uid,
+        },
+        deleting,
+        context.secrets.as_ref(),
+        context.provider_gateway.as_ref(),
+        now,
+    )
+    .await?;
+    if step == Step::Finalize {
+        let finalizers = object
+            .finalizers()
+            .iter()
+            .filter(|f| f.as_str() != FINALIZER)
+            .cloned()
+            .collect();
+        set_finalizers(&context.providers, object.as_ref(), finalizers).await?;
+        return Ok(Action::await_change());
+    }
+    if object.status.as_ref() != Some(&status) {
+        context
+            .providers
+            .patch_status(
+                &name,
+                &PatchParams::default(),
+                &Patch::Merge(json!({
+                    "metadata": {"resourceVersion": object.resource_version(), "uid": uid},
+                    "status": status
+                })),
+            )
+            .await?;
+    }
+    let Step::Requeue(seconds) = step else {
+        unreachable!("finalize returned above")
+    };
+    Ok(Action::requeue(Duration::from_secs(seconds)))
+}
+
 fn report(failed: bool) -> futures::future::Ready<()> {
     if failed {
         eprintln!("controller observation failed");
@@ -776,12 +1105,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let client = Client::try_default().await?;
     let api = Api::namespaced(client.clone(), &namespace);
-    let templates = Api::namespaced(client, &namespace);
+    let templates = Api::namespaced(client.clone(), &namespace);
+    let providers: Api<OpenShellProvider> = Api::namespaced(client.clone(), &namespace);
+    let secrets: Api<Secret> = Api::namespaced(client, &namespace);
     let context = Arc::new(Context {
         api: api.clone(),
         templates: templates.clone(),
+        providers: providers.clone(),
+        secrets: Arc::new(KubeSecrets {
+            api: secrets.clone(),
+        }),
         gateway: gateway.clone(),
-        template_gateway: gateway,
+        template_gateway: gateway.clone(),
+        provider_gateway: gateway,
         gateway_url,
         workspace,
         namespace,
@@ -794,11 +1130,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run(reconcile, error_policy, Arc::clone(&context))
         .for_each(|result| report(result.is_err()));
     let templates = Controller::new(templates, watcher::Config::default())
+        .with_config(config.clone())
+        .shutdown_on_signal()
+        .run(reconcile_template, error_policy, Arc::clone(&context))
+        .for_each(|result| report(result.is_err()));
+    // A Secret change reconciles every provider that references the Secret.
+    let provider_controller = Controller::new(providers, watcher::Config::default());
+    let declared = provider_controller.store();
+    let providers = provider_controller
+        .watches(
+            secrets,
+            watcher::Config::default(),
+            move |secret: Secret| {
+                let name = secret.name_any();
+                declared
+                    .state()
+                    .into_iter()
+                    .filter(|provider| provider::references_secret(&provider.spec, &name))
+                    .map(|provider| ObjectRef::from_obj(provider.as_ref()))
+                    .collect::<Vec<_>>()
+            },
+        )
         .with_config(config)
         .shutdown_on_signal()
-        .run(reconcile_template, error_policy, context)
+        .run(reconcile_provider, error_policy, context)
         .for_each(|result| report(result.is_err()));
-    futures::join!(sandboxes, templates);
+    futures::join!(sandboxes, templates, providers);
     Ok(())
 }
 
@@ -837,6 +1194,28 @@ mod tests {
         async fn remove_all(&self, _: &str, _: &str) -> Result<(), GatewayError> {
             self.calls.lock().unwrap().push("remove");
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ProviderGateway for MockGateway {
+        async fn apply(&self, _: &Desired) -> Result<(), GatewayError> {
+            self.calls.lock().unwrap().push("apply");
+            Ok(())
+        }
+
+        async fn remove(&self, _: &str, _: &str, _: &str) -> Result<(), GatewayError> {
+            self.calls.lock().unwrap().push("remove");
+            Ok(())
+        }
+    }
+
+    struct NoSecrets;
+
+    #[async_trait]
+    impl SecretReader for NoSecrets {
+        async fn read(&self, _: &str) -> Result<Option<SecretData>, SecretsError> {
+            Ok(None)
         }
     }
 
@@ -987,9 +1366,12 @@ mod tests {
         });
         let context = Arc::new(Context {
             api: Api::namespaced(client.clone(), "agents"),
-            templates: Api::namespaced(client, "agents"),
+            templates: Api::namespaced(client.clone(), "agents"),
+            providers: Api::namespaced(client, "agents"),
+            secrets: Arc::new(NoSecrets),
             gateway: gateway.clone(),
-            template_gateway: gateway,
+            template_gateway: gateway.clone(),
+            provider_gateway: gateway,
             gateway_url: "http://gateway:8080".into(),
             workspace: "default".into(),
             namespace: "agents".into(),
@@ -1198,6 +1580,43 @@ mod tests {
         assert_eq!(
             request.service_exposures[0].authorization_mode,
             i32::from(proto::ServiceAuthorizationMode::BearerPassthrough)
+        );
+    }
+
+    #[test]
+    fn provider_message_owns_the_provider_and_clears_removed_keys() {
+        let desired = Desired {
+            workspace: "default".into(),
+            name: "nvidia".into(),
+            source_uid: "0b5e8f2a-3c1d-4e6f-8a9b-1c2d3e4f5a6b".into(),
+            type_: "nvidia".into(),
+            global_profile: false,
+            credentials: [("NVIDIA_API_KEY".to_owned(), "value".to_owned())].into(),
+            config: [("region".to_owned(), "us".to_owned())].into(),
+            removed_credentials: vec!["OLD_KEY".into()],
+            removed_config: vec!["old".into()],
+            refresh: Vec::new(),
+            retired_refresh: Vec::new(),
+        };
+        let provider = provider_message(&desired);
+        let metadata = provider.metadata.unwrap();
+        assert_eq!(metadata.name, "nvidia");
+        assert_eq!(
+            metadata.labels.get(SOURCE_UID_LABEL).map(String::as_str),
+            Some("0b5e8f2a-3c1d-4e6f-8a9b-1c2d3e4f5a6b")
+        );
+        assert_eq!(provider.r#type, "nvidia");
+        assert_eq!(
+            provider.profile_workspace, "default",
+            "a workspace profile by default"
+        );
+        assert_eq!(provider.credentials["NVIDIA_API_KEY"], "value");
+        assert_eq!(provider.credentials["OLD_KEY"], "", "empty deletes the key");
+        assert_eq!(provider.config["region"], "us");
+        assert_eq!(provider.config["old"], "");
+        assert_eq!(
+            refresh_strategy(RefreshStrategy::OAuth2ClientCredentials),
+            proto::ProviderCredentialRefreshStrategy::Oauth2ClientCredentials
         );
     }
 
