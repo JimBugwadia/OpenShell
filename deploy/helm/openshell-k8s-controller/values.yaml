@@ -53,7 +53,7 @@ gateway:
 
 # -- Seconds between checks for rotated gateway credentials; 0 disables
 # reloading.
-credentialReloadSeconds: 30
+credentialReloadSeconds: 10
 # -- Reconciles that may run at once.
 maxConcurrentReconciles: 16
 # -- Report the gateway's runtime phase in each sandbox's status.

@@ -25,7 +25,7 @@ with one active. The holder renews it every third of
 Lease expires, and releases it on shutdown so a standby takes over at once.
 Every Lease write is conditional on its resource version.
 
-Every `--credential-reload-seconds` (default 30), the controller rereads its
+Every `--credential-reload-seconds` (default 10), the controller rereads its
 token, CA, and client certificate files. When they change, it connects with
 the new credentials and switches to the new connection; if that fails, it
 keeps the current connection and tries again. A Secret mounted as a volume

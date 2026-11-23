@@ -78,7 +78,7 @@ again.
 | `replicaCount` | `2` | Replicas. More than one requires `leaderElection.enabled`. |
 | `leaderElection.enabled` | `true` | Run the controllers only in the replica that holds the Lease. |
 | `leaderElection.leaseDurationSeconds` | `15` | How long the Lease stays valid without a renewal. |
-| `credentialReloadSeconds` | `30` | Seconds between checks for rotated credentials; `0` disables reloading. |
+| `credentialReloadSeconds` | `10` | Seconds between checks for rotated credentials; `0` disables reloading. |
 | `maxConcurrentReconciles` | `16` | Reconciles that may run at once. |
 | `reportGatewayPhase` | `true` | Report the gateway's runtime phase in sandbox status. |
 | `crds.install` | `true` | Install the CRDs. Set `false` in every release but one. |

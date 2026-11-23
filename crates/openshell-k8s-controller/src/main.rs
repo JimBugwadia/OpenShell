@@ -94,7 +94,7 @@ struct Args {
     lease_duration_seconds: u64,
     /// Seconds between checks of the credential files; 0 disables reloading.
     /// A rotated Secret mounted as files takes effect without a restart.
-    #[arg(long, default_value_t = 30)]
+    #[arg(long, default_value_t = 10)]
     credential_reload_seconds: u64,
 }
 
