@@ -341,10 +341,10 @@ fn generated_crd_uses_transition_cel_and_status_subresource() {
     assert_eq!(
         crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["x-kubernetes-validations"]
             [1]["rule"],
-        "!(has(self.workloadTemplate) && has(self.workload))"
+        "!(has(self.templateRef) && has(self.workload))"
     );
     for field in [
-        "workloadTemplate",
+        "templateRef",
         "workload",
         "providers",
         "command",
@@ -364,7 +364,7 @@ fn generated_crd_uses_transition_cel_and_status_subresource() {
 #[test]
 fn template_in_another_namespace_is_refused() {
     let spec = |namespace: Option<&str>| SandboxSpec {
-        workload_template: Some(TemplateRef {
+        template_ref: Some(TemplateRef {
             name: "agent".into(),
             namespace: namespace.map(Into::into),
         }),
@@ -381,7 +381,7 @@ fn template_in_another_namespace_is_refused() {
 #[test]
 fn invalid_policy_is_refused() {
     let spec = |policy: serde_json::Value| SandboxSpec {
-        workload_template: None,
+        template_ref: None,
         inputs: SandboxInputs {
             policy: Some(policy),
             ..SandboxInputs::default()
@@ -857,5 +857,20 @@ fn template_crd_is_mutable_and_uses_the_ossbxt_short_name() {
     assert_eq!(
         schema["status"]["properties"]["conditions"]["x-kubernetes-list-type"],
         "map"
+    );
+}
+
+#[test]
+fn the_helm_chart_crds_are_current() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../deploy/helm/openshell-k8s-controller/files/crds.yaml"
+    );
+    let file = std::fs::read_to_string(path).unwrap();
+    let start = file.find("apiVersion:").unwrap();
+    assert_eq!(
+        &file[start..],
+        openshell_k8s_controller::crd_manifest().unwrap(),
+        "regenerate files/crds.yaml with --print-crd"
     );
 }

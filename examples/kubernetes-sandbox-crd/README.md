@@ -127,7 +127,7 @@ metadata:
   name: support-agent
   namespace: agents
 spec:
-  workloadTemplate:
+  templateRef:
     name: demo-agent
   providers: [github]
 EOF
@@ -179,7 +179,7 @@ Point out: the gateway record carries `kubernetes.openshell.ai/namespace`,
 
 ```shell
 kubectl patch ossbx support-agent -n agents --type=merge \
-  -p '{"spec":{"workloadTemplate":{"name":"something-else"}}}'
+  -p '{"spec":{"templateRef":{"name":"something-else"}}}'
 ```
 
 Expected: the API server rejects the change with an `immutable` error. The
@@ -226,7 +226,7 @@ metadata:
   name: missing-template
   namespace: agents
 spec:
-  workloadTemplate:
+  templateRef:
     name: does-not-exist
 EOF
 kubectl wait --for=jsonpath='{.status.reason}'=TemplateNotFound ossbx/missing-template -n agents

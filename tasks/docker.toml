@@ -37,6 +37,16 @@ description = "Build the supervisor image"
 run = "tasks/scripts/docker-build-image.sh supervisor"
 hide = true
 
+["build:docker:k8s-controller"]
+description = "Build the experimental Kubernetes controller image"
+run = "tasks/scripts/docker-build-image.sh k8s-controller"
+hide = true
+
+["docker:build:k8s-controller"]
+description = "Alias for build:docker:k8s-controller"
+depends = ["build:docker:k8s-controller"]
+hide = true
+
 ["docker:build:gateway"]
 description = "Alias for build:docker:gateway"
 depends = ["build:docker:gateway"]

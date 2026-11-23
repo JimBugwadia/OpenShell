@@ -239,7 +239,7 @@ metadata:
   name: support-agent
   namespace: ${NAMESPACE}
 spec:
-  workloadTemplate:
+  templateRef:
     name: ${TEMPLATE}
   providers: [${PROVIDER}]
   # The same format as a policy file for openshell sandbox create --policy.
@@ -334,7 +334,7 @@ pass "the gateway sandbox has the policy declared in the resource"
 
 step "3. The workload template is immutable; changes are rejected at admission"
 if kctl patch ossbx support-agent -n "${NAMESPACE}" --type=merge \
-  -p '{"spec":{"workloadTemplate":{"name":"something-else"}}}' 2>&1; then
+  -p '{"spec":{"templateRef":{"name":"something-else"}}}' 2>&1; then
   fail "API server accepted a workload template change"
 fi
 pass "workload change rejected; create a new resource to run a different workload"
@@ -372,7 +372,7 @@ metadata:
   name: missing-template
   namespace: ${NAMESPACE}
 spec:
-  workloadTemplate:
+  templateRef:
     name: does-not-exist
 EOF
 run kctl wait --for=jsonpath='{.status.reason}'=TemplateNotFound --timeout=120s \

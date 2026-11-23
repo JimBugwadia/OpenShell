@@ -49,6 +49,9 @@ required_prebuilt_binaries() {
 		supervisor|supervisor-sideload|supervisor-output)
 			echo "openshell-supervisor"
 			;;
+		k8s-controller)
+			echo "openshell-k8s-controller"
+			;;
 	esac
 }
 
@@ -95,7 +98,7 @@ ensure_prebuilt_binaries() {
 	fi
 }
 
-TARGET=${1:?"Usage: docker-build-image.sh <gateway|sandbox|supervisor|supervisor-output> [extra-args...]"}
+TARGET=${1:?"Usage: docker-build-image.sh <gateway|sandbox|supervisor|supervisor-output|k8s-controller> [extra-args...]"}
 shift
 
 IS_FINAL_IMAGE=0
@@ -120,6 +123,12 @@ case "${TARGET}" in
     IMAGE_NAME="openshell/supervisor"
     DOCKER_TARGET="supervisor"
     DOCKERFILE="deploy/docker/Dockerfile.supervisor"
+    ;;
+  k8s-controller)
+    IS_FINAL_IMAGE=1
+    IMAGE_NAME="openshell/k8s-controller"
+    DOCKER_TARGET="k8s-controller"
+    DOCKERFILE="deploy/docker/Dockerfile.k8s-controller"
     ;;
   supervisor-output)
     # Backward-compat alias: same as "supervisor".

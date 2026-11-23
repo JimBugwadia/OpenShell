@@ -127,7 +127,7 @@ metadata:
   name: ${resource_name}
   namespace: ${OPENSHELL_CONTROLLER_NAMESPACE}
 spec:
-  workloadTemplate:
+  templateRef:
     name: ${OPENSHELL_CONTROLLER_TEMPLATE}
 EOF
 resource_created=1

@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# -- Override the chart name.
+nameOverride: ""
+# -- Override the full generated resource name.
+fullnameOverride: ""
+
+image:
+  # -- Controller image repository.
+  repository: ghcr.io/nvidia/openshell/k8s-controller
+  # -- Image tag. Defaults to the chart appVersion.
+  tag: ""
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Image pull Secrets for the controller pods.
+imagePullSecrets: []
+
+# -- Controller replicas. One replica is active at a time; the others wait
+# for the leader Lease. More than one replica requires leaderElection.enabled.
+replicaCount: 2
+
+leaderElection:
+  # -- Run the controllers only in the replica that holds a Lease in the
+  # release namespace.
+  enabled: true
+  # -- Seconds the Lease stays valid without a renewal. A standby takes over
+  # within about this long after the leader stops.
+  leaseDurationSeconds: 15
+
+# -- Namespace whose OpenShell resources this release reconciles. Defaults to
+# the release namespace. The chart creates the controller's Role there.
+watchNamespace: ""
+
+gateway:
+  # -- (required) Gateway URL that the controller calls, for example
+  # https://openshell.openshell.svc:8080.
+  url: ""
+  # -- (required) Gateway workspace that the watched namespace maps to.
+  workspace: ""
+  tls:
+    # -- Secret with the gateway CA and the controller's client certificate,
+    # in the keys ca.crt, tls.crt, and tls.key. When you rotate it, the
+    # controller reconnects with the new certificate without a restart.
+    secretName: ""
+  token:
+    # -- Secret with an OIDC bearer token for the gateway, instead of or in
+    # addition to a client certificate.
+    secretName: ""
+    # -- Key of the token in the Secret.
+    key: token
+
+# -- Seconds between checks for rotated gateway credentials; 0 disables
+# reloading.
+credentialReloadSeconds: 30
+# -- Reconciles that may run at once.
+maxConcurrentReconciles: 16
+# -- Report the gateway's runtime phase in each sandbox's status.
+reportGatewayPhase: true
+
+crds:
+  # -- Install the OpenShell CRDs. They're cluster-scoped and kept when you
+  # uninstall the release. Set false in every release but one.
+  install: true
+
+userRoles:
+  # -- Create the openshell-sandbox-platform and openshell-sandbox-developer
+  # ClusterRoles. Set false in every release but one.
+  create: true
+
+serviceAccount:
+  # -- Create the controller ServiceAccount.
+  create: true
+  # -- ServiceAccount name. Defaults to the full name.
+  name: ""
+
+# -- Controller container resources.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+# -- Pod security context.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# -- Extra /etc/hosts entries, for example to reach a gateway by a name that
+# cluster DNS doesn't resolve.
+hostAliases: []
+# -- Extra pod labels.
+podLabels: {}
+# -- Extra pod annotations.
+podAnnotations: {}
+# -- Node selector.
+nodeSelector: {}
+# -- Tolerations.
+tolerations: []
+# -- Affinity.
+affinity: {}

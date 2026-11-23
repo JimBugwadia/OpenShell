@@ -8,6 +8,7 @@ use kube::{CustomResource, CustomResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod leader;
 pub mod provider;
 pub mod template;
 
@@ -70,7 +71,7 @@ pub struct SandboxSpec {
     /// existing gateway workload template. Omit it to describe the workload
     /// inline with `workload`, or to use the gateway's default image.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workload_template: Option<TemplateRef>,
+    pub template_ref: Option<TemplateRef>,
     #[serde(flatten)]
     pub inputs: SandboxInputs,
 }
@@ -157,7 +158,7 @@ impl SandboxSpec {
     #[must_use]
     pub fn refusal(&self, namespace: &str) -> Option<&'static str> {
         let other_namespace = self
-            .workload_template
+            .template_ref
             .as_ref()
             .and_then(|reference| reference.namespace.as_deref())
             .is_some_and(|ns| ns != namespace);
@@ -433,8 +434,8 @@ pub fn crd() -> Result<serde_json::Value, serde_json::Error> {
             "message": "spec is immutable; create a new Sandbox for a different workload"
         },
         {
-            "rule": "!(has(self.workloadTemplate) && has(self.workload))",
-            "message": "set workloadTemplate or workload, not both"
+            "rule": "!(has(self.templateRef) && has(self.workload))",
+            "message": "set templateRef or workload, not both"
         }
     ]);
     map_conditions(schema);
@@ -460,6 +461,15 @@ pub fn provider_crd() -> Result<serde_json::Value, serde_json::Error> {
 /// Every CRD the controller serves, in install order.
 pub fn crds() -> Result<Vec<serde_json::Value>, serde_json::Error> {
     Ok(vec![crd()?, template_crd()?, provider_crd()?])
+}
+
+/// The CRDs as one multi-document YAML manifest, as `--print-crd` prints it.
+pub fn crd_manifest() -> Result<String, Box<dyn std::error::Error>> {
+    let documents = crds()?
+        .iter()
+        .map(|crd| serde_yml::to_string(crd).map(|yaml| yaml.trim_end().to_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(documents.join("\n---\n") + "\n")
 }
 
 fn map_conditions(schema: &mut serde_json::Value) {

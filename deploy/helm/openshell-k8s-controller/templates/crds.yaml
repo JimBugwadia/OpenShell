@@ -1,0 +1,18 @@
+{{- /*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+The CRDs live in templates/ rather than crds/ so that upgrades update them.
+Helm keeps them on uninstall so that deleting the release never deletes
+every OpenShell resource in the cluster.
+*/ -}}
+{{- if .Values.crds.install }}
+{{- range $document := regexSplit "\n---\n" ($.Files.Get "files/crds.yaml") -1 }}
+{{- $crd := fromYaml $document }}
+{{- $annotations := merge (default (dict) $crd.metadata.annotations) (dict "helm.sh/resource-policy" "keep") }}
+{{- $_ := set $crd.metadata "annotations" $annotations }}
+{{- $_ := set $crd.metadata "labels" (merge (default (dict) $crd.metadata.labels) (fromYaml (include "openshell-k8s-controller.labels" $))) }}
+---
+{{ toYaml $crd }}
+{{- end }}
+{{- end }}

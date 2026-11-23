@@ -3,11 +3,12 @@
 This package contains the controller's namespaced RBAC, ClusterRoles for
 platform engineers and developers, and a sample `OpenShellSandboxTemplate`
 and `OpenShellSandbox`. An `OpenShellProvider` declares a gateway provider whose
-credentials come from Kubernetes Secrets. The
-controller is run from the source checkout with Cargo; it intentionally has no
-Deployment or container image because this prototype does not publish a
-controller image. Install its CRD from the executable so the served schema and
-the controller stay in sync; `--print-crd` prints all three CRDs.
+credentials come from Kubernetes Secrets. These manifests run the controller
+from the source checkout with Cargo. To run it in the cluster, use the
+[Helm chart](../helm/openshell-k8s-controller/README.md), which installs the
+CRDs, RBAC, roles, and a Deployment. Install the CRDs from the executable so
+the served schema and the controller stay in sync; `--print-crd` prints all
+three CRDs.
 
 For a step-by-step walkthrough on a local kind cluster, see the
 [Kubernetes sandbox CRD example](../../examples/kubernetes-sandbox-crd/README.md).
@@ -87,10 +88,7 @@ kubectl --context "$KUBE_CONTEXT" create rolebinding agents-developers \
 ```
 
 For host development, run the process with a kubeconfig identity granted the
-same Role permissions. The packaged service account and RoleBinding are ready
-for an in-cluster deployment, but this prototype intentionally supplies no
-Deployment or image. To use the sample RoleBinding in a future in-cluster
-runtime, set that runtime's service account to `openshell-k8s-controller`.
+same Role permissions.
 
 Configure gateway credentials with the options supported by the binary:
 
@@ -137,7 +135,7 @@ journal, including request IDs, attempt counters, and RFC 3339 retry
 timestamps; don't edit it.
 
 The sandbox spec is immutable; create a new resource to request a different
-template. `workloadTemplate.name` names an `OpenShellSandboxTemplate` in the
+template. `templateRef.name` names an `OpenShellSandboxTemplate` in the
 same namespace or, if none exists, a gateway template. Use `workload` instead
 to describe the image inline. Set `command` to start the agent, because the
 image's own command never runs, and list gateway providers by name in
@@ -174,8 +172,8 @@ kubectl --context "$KUBE_CONTEXT" delete openshellsandbox support-agent-demo \
 
 ## Prototype constraints
 
-- Run one controller replica for a single namespace/workspace/gateway binding.
-  Leader election and multiple-replica coordination are not implemented.
+- Run one controller instance for a single namespace/workspace/gateway
+  binding. Run more than one replica only with `--leader-election-lease`.
 - Retries replay the same deterministic request ID with exponential backoff
   (30 seconds, doubling to a one-hour cap) for at most 10 attempts and within a
   23-hour window. While retrying, the resource reports `Progressing`. Exhausted

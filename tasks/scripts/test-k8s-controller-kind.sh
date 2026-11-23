@@ -120,7 +120,7 @@ metadata:
   name: schema-check
   namespace: ${NAMESPACE}
 spec:
-  workloadTemplate:
+  templateRef:
     name: support-agent-v2
 EOF
 
@@ -131,13 +131,13 @@ metadata:
   name: template-and-workload
   namespace: ${NAMESPACE}
 spec:
-  workloadTemplate:
+  templateRef:
     name: support-agent-v2
   workload:
     image: registry.example.com/agent:1
 EOF
 then
-  echo "ERROR: API server accepted both workloadTemplate and workload." >&2
+  echo "ERROR: API server accepted both templateRef and workload." >&2
   exit 1
 fi
 
@@ -163,14 +163,14 @@ metadata:
   name: immutable-check
   namespace: ${NAMESPACE}
 spec:
-  workloadTemplate:
+  templateRef:
     name: support-agent-v2
 EOF
 
 if kctl patch openshellsandbox immutable-check \
   --namespace="${NAMESPACE}" \
   --type=merge \
-  --patch '{"spec":{"workloadTemplate":{"name":"different-template"}}}'; then
+  --patch '{"spec":{"templateRef":{"name":"different-template"}}}'; then
   echo "ERROR: API server accepted a mutation to immutable spec." >&2
   exit 1
 fi

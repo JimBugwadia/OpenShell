@@ -1,0 +1,50 @@
+{{- /*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Roles for people and GitOps identities. Bind them per namespace with a
+RoleBinding; neither role grants access to Secrets.
+*/ -}}
+{{- if .Values.userRoles.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openshell-sandbox-platform
+  labels:
+    {{- include "openshell-k8s-controller.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["openshell.ai"]
+    resources: ["openshellsandboxtemplates", "openshellproviders"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["openshell.ai"]
+    resources: ["openshellsandboxes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["openshell.ai"]
+    resources:
+      - "openshellsandboxes/status"
+      - "openshellsandboxtemplates/status"
+      - "openshellproviders/status"
+    verbs: ["get"]
+---
+# Developers declare sandboxes and read the templates and providers they can
+# use. They can't change templates or providers, or read their Secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openshell-sandbox-developer
+  labels:
+    {{- include "openshell-k8s-controller.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["openshell.ai"]
+    resources: ["openshellsandboxes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["openshell.ai"]
+    resources: ["openshellsandboxtemplates", "openshellproviders"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["openshell.ai"]
+    resources:
+      - "openshellsandboxes/status"
+      - "openshellsandboxtemplates/status"
+      - "openshellproviders/status"
+    verbs: ["get"]
+{{- end }}

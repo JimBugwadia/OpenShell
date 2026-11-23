@@ -33,7 +33,7 @@ run_windows = "echo Skipping helm:docs:check: Helm validation is not part of the
 hide = true
 
 ["helm:lint"]
-description = "Lint the OpenShell gateway and workspace Helm charts"
+description = "Lint the OpenShell gateway, workspace, and k8s controller Helm charts"
 run = """
   set -e
   helm dependency build deploy/helm/openshell
@@ -50,6 +50,10 @@ run = """
   done
   echo "--- helm lint: workspace defaults ---"
   helm lint deploy/helm/openshell-workspace
+  echo "--- helm lint: k8s controller ---"
+  controller_values="--set gateway.url=https://openshell:8080 --set gateway.workspace=default --set gateway.tls.secretName=openshell-controller-tls"
+  helm lint deploy/helm/openshell-k8s-controller $controller_values
+  helm template controller deploy/helm/openshell-k8s-controller $controller_values >/dev/null
   echo "All variants passed."
 """
 run_windows = "echo Skipping helm:lint: Helm validation is not part of the native Windows lane."

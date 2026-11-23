@@ -6,7 +6,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use clap::Parser;
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::Secret;
+use k8s_openapi::api::{coordination::v1::Lease, core::v1::Secret};
 use kube::{
     Api, Client, ResourceExt,
     api::{Patch, PatchParams},
@@ -20,7 +20,9 @@ use kube_runtime::{
 use openshell_k8s_controller::{
     Binding, FINALIZER, Gateway, GatewayError, Missing, OpenShellSandbox, Outcome, Persistence,
     PersistenceError, RemoteSandbox, RestartPolicy, SandboxInputs, SandboxStatus,
-    ServiceAuthorization, advance, crds, next_observation,
+    ServiceAuthorization, advance, crd_manifest,
+    leader::{Election, LeaseLost},
+    next_observation,
     provider::{
         self, Desired, OpenShellProvider, ProviderGateway, RefreshStrategy, SecretData,
         SecretReader, SecretsError, Step,
@@ -77,10 +79,117 @@ struct Args {
     /// set to false to avoid a status write each time a sandbox sleeps or wakes.
     #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
     report_gateway_phase: bool,
+    /// Run the controllers only while holding this Lease, so several replicas
+    /// can run with one active. Without it, run only one replica.
+    #[arg(long)]
+    leader_election_lease: Option<String>,
+    /// Namespace of the Lease (default: --namespace).
+    #[arg(long, requires = "leader_election_lease")]
+    leader_election_namespace: Option<String>,
+    /// This replica's identity in the Lease (default: the pod name).
+    #[arg(long, env = "POD_NAME", requires = "leader_election_lease")]
+    leader_election_identity: Option<String>,
+    /// Seconds the Lease stays valid without a renewal.
+    #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u64).range(3..))]
+    lease_duration_seconds: u64,
+    /// Seconds between checks of the credential files; 0 disables reloading.
+    /// A rotated Secret mounted as files takes effect without a restart.
+    #[arg(long, default_value_t = 30)]
+    credential_reload_seconds: u64,
 }
 
 struct RpcGateway {
-    client: OpenShellClient,
+    client: std::sync::RwLock<OpenShellClient>,
+}
+
+impl RpcGateway {
+    fn grpc(&self) -> openshell_sdk::raw::AuthedGrpcClient {
+        self.client
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .raw_grpc()
+    }
+}
+
+/// The paths of the gateway credentials.
+struct CredentialFiles {
+    token: Option<PathBuf>,
+    ca: Option<PathBuf>,
+    cert: Option<PathBuf>,
+    key: Option<PathBuf>,
+}
+
+/// The contents of the gateway credential files.
+#[derive(PartialEq, Eq)]
+struct Credentials {
+    token: Option<Vec<u8>>,
+    ca: Option<Vec<u8>>,
+    cert: Option<Vec<u8>>,
+    key: Option<Vec<u8>>,
+}
+
+impl CredentialFiles {
+    fn read(&self) -> std::io::Result<Credentials> {
+        let read = |path: &Option<PathBuf>| path.as_ref().map(std::fs::read).transpose();
+        Ok(Credentials {
+            token: read(&self.token)?,
+            ca: read(&self.ca)?,
+            cert: read(&self.cert)?,
+            key: read(&self.key)?,
+        })
+    }
+}
+
+async fn connect(url: &str, credentials: &Credentials) -> Result<OpenShellClient, String> {
+    let mut config = ClientConfig::new(url);
+    if let Some(token) = &credentials.token {
+        let token = String::from_utf8(token.clone()).map_err(|_| "token file isn't UTF-8")?;
+        config.auth = Some(AuthConfig::oidc(token.trim()));
+    }
+    config.ca_cert.clone_from(&credentials.ca);
+    if let (Some(cert), Some(key)) = (&credentials.cert, &credentials.key) {
+        config.client_identity = Some(ClientIdentity::new(cert.clone(), key.clone()));
+    }
+    tokio::time::timeout(CALL_TIMEOUT, OpenShellClient::connect(config))
+        .await
+        .map_err(|_| "gateway connection timed out".to_owned())?
+        .map_err(|_| "gateway connection failed".to_owned())
+}
+
+/// Reconnect with new credentials when the files change. Kubernetes updates
+/// a mounted Secret atomically, so the certificate and key always match.
+/// A failed reconnect keeps the current connection and retries.
+async fn reload_credentials(
+    gateway: Arc<RpcGateway>,
+    url: String,
+    files: CredentialFiles,
+    mut current: Credentials,
+    interval: Duration,
+) {
+    loop {
+        tokio::time::sleep(interval).await;
+        let next = match files.read() {
+            Ok(next) if next != current => next,
+            Ok(_) => continue,
+            Err(error) => {
+                eprintln!("credential reload: cannot read the credential files: {error}");
+                continue;
+            }
+        };
+        match connect(&url, &next).await {
+            Ok(client) => {
+                *gateway
+                    .client
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = client;
+                current = next;
+                eprintln!("credential reload: reconnected to the gateway with new credentials");
+            }
+            Err(error) => {
+                eprintln!("credential reload: {error}; keeping the current connection");
+            }
+        }
+    }
 }
 
 fn sandbox_spec(inputs: &SandboxInputs) -> proto::SandboxSpec {
@@ -219,10 +328,9 @@ fn remote(sandbox: openshell_sdk::raw::Sandbox) -> Result<RemoteSandbox, Gateway
 impl Gateway for RpcGateway {
     async fn create(&self, binding: &Binding) -> Result<RemoteSandbox, GatewayError> {
         let request = create_request(binding);
-        let result =
-            tokio::time::timeout(CALL_TIMEOUT, self.client.raw_grpc().create_sandbox(request))
-                .await
-                .map_err(|_| GatewayError::Uncertain)?;
+        let result = tokio::time::timeout(CALL_TIMEOUT, self.grpc().create_sandbox(request))
+            .await
+            .map_err(|_| GatewayError::Uncertain)?;
         match result {
             Ok(response) => remote(
                 response
@@ -261,7 +369,7 @@ impl Gateway for RpcGateway {
     async fn get(&self, binding: &Binding) -> Result<Option<RemoteSandbox>, GatewayError> {
         let result = tokio::time::timeout(
             CALL_TIMEOUT,
-            self.client.raw_grpc().get_sandbox(GetSandboxRequest {
+            self.grpc().get_sandbox(GetSandboxRequest {
                 workspace_scope: Some(proto::workspace_selector(&binding.workspace)),
                 name: binding.sandbox_name.clone(),
             }),
@@ -284,7 +392,7 @@ impl Gateway for RpcGateway {
     async fn delete(&self, binding: &Binding) -> Result<(), GatewayError> {
         tokio::time::timeout(
             CALL_TIMEOUT,
-            self.client.raw_grpc().delete_sandbox(DeleteSandboxRequest {
+            self.grpc().delete_sandbox(DeleteSandboxRequest {
                 workspace_scope: Some(proto::workspace_selector(&binding.workspace)),
                 name: binding.sandbox_name.clone(),
                 allow_missing: true,
@@ -334,8 +442,7 @@ impl TemplateGateway for RpcGateway {
     async fn publish(&self, revision: &Revision) -> Result<(), GatewayError> {
         let result = tokio::time::timeout(
             CALL_TIMEOUT,
-            self.client
-                .raw_grpc()
+            self.grpc()
                 .create_sandbox_template(template_request(revision)),
         )
         .await
@@ -346,12 +453,10 @@ impl TemplateGateway for RpcGateway {
                 // Adopt only a revision this resource published earlier.
                 let existing = tokio::time::timeout(
                     CALL_TIMEOUT,
-                    self.client
-                        .raw_grpc()
-                        .get_sandbox_template(GetSandboxTemplateRequest {
-                            workspace_scope: Some(proto::workspace_selector(&revision.workspace)),
-                            name: revision.name.clone(),
-                        }),
+                    self.grpc().get_sandbox_template(GetSandboxTemplateRequest {
+                        workspace_scope: Some(proto::workspace_selector(&revision.workspace)),
+                        name: revision.name.clone(),
+                    }),
                 )
                 .await
                 .map_err(|_| GatewayError::Uncertain)?
@@ -384,8 +489,7 @@ impl TemplateGateway for RpcGateway {
     async fn remove_all(&self, workspace: &str, source_uid: &str) -> Result<(), GatewayError> {
         let listed = tokio::time::timeout(
             CALL_TIMEOUT,
-            self.client
-                .raw_grpc()
+            self.grpc()
                 .list_sandbox_templates(ListSandboxTemplatesRequest {
                     workspace_scope: Some(proto::workspace_selector(workspace)),
                     page_size: 1000,
@@ -401,8 +505,7 @@ impl TemplateGateway for RpcGateway {
             let name = template.metadata.map(|m| m.name).unwrap_or_default();
             let result = tokio::time::timeout(
                 CALL_TIMEOUT,
-                self.client
-                    .raw_grpc()
+                self.grpc()
                     .delete_sandbox_template(DeleteSandboxTemplateRequest {
                         workspace_scope: Some(proto::workspace_selector(workspace)),
                         name,
@@ -499,7 +602,7 @@ impl RpcGateway {
     ) -> Result<Option<(String, String)>, GatewayError> {
         let result = tokio::time::timeout(
             CALL_TIMEOUT,
-            self.client.raw_grpc().get_provider(GetProviderRequest {
+            self.grpc().get_provider(GetProviderRequest {
                 workspace_scope: Some(proto::workspace_selector(workspace)),
                 name: name.into(),
             }),
@@ -528,7 +631,7 @@ impl RpcGateway {
 impl ProviderGateway for RpcGateway {
     async fn apply(&self, desired: &Desired) -> Result<(), GatewayError> {
         let workspace = Some(proto::workspace_selector(&desired.workspace));
-        let mut grpc = self.client.raw_grpc();
+        let mut grpc = self.grpc();
         let result = match self
             .provider_owner(&desired.workspace, &desired.name)
             .await?
@@ -631,14 +734,12 @@ impl ProviderGateway for RpcGateway {
         }
         let result = tokio::time::timeout(
             CALL_TIMEOUT,
-            self.client
-                .raw_grpc()
-                .delete_provider(DeleteProviderRequest {
-                    workspace_scope: Some(proto::workspace_selector(workspace)),
-                    name: name.into(),
-                    allow_missing: true,
-                    request_id: String::new(),
-                }),
+            self.grpc().delete_provider(DeleteProviderRequest {
+                workspace_scope: Some(proto::workspace_selector(workspace)),
+                name: name.into(),
+                allow_missing: true,
+                request_id: String::new(),
+            }),
         )
         .await
         .map_err(|_| GatewayError::Uncertain)?;
@@ -770,7 +871,7 @@ async fn reconcile(object: Arc<OpenShellSandbox>, context: Arc<Context>) -> Resu
     // Resolve the template once, before the first submission. The journal then
     // pins the revision, so a later template change never alters this sandbox.
     let refusal = object.spec.refusal(&context.namespace);
-    let template = match (object.status.as_ref(), &object.spec.workload_template) {
+    let template = match (object.status.as_ref(), &object.spec.template_ref) {
         (Some(status), _) => status.journal.binding.workload_template.clone(),
         (None, Some(reference)) if refusal.is_none() => {
             match resolve_template(&context.templates, &reference.name).await? {
@@ -860,7 +961,7 @@ const TEMPLATE_WAIT: Duration = Duration::from_secs(10);
 /// A refused spec can't change, so it's rechecked only to observe deletion.
 const REFUSED_WAIT: Duration = Duration::from_mins(5);
 
-/// Gateway template for a sandbox's `workloadTemplate`: the current revision of
+/// Gateway template for a sandbox's `templateRef`: the current revision of
 /// an `OpenShellSandboxTemplate` with that name, or else the name itself, an
 /// existing gateway template. `None` while the named resource isn't published.
 async fn resolve_template(
@@ -1074,11 +1175,7 @@ fn unix_now() -> Result<i64, Error> {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     if args.print_crd {
-        let documents = crds()?
-            .iter()
-            .map(|crd| serde_yml::to_string(crd).map(|yaml| yaml.trim_end().to_owned()))
-            .collect::<Result<Vec<_>, _>>()?;
-        println!("{}", documents.join("\n---\n"));
+        print!("{}", crd_manifest()?);
         return Ok(());
     }
     let namespace = args.namespace.ok_or("--namespace is required")?;
@@ -1090,26 +1187,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("binding flags must be nonempty".into());
     }
-    let mut config = ClientConfig::new(&gateway_url);
-    if let Some(path) = args.token_file {
-        config.auth = Some(AuthConfig::oidc(std::fs::read_to_string(path)?.trim()));
-    }
-    if let Some(path) = args.tls_ca {
-        config.ca_cert = Some(std::fs::read(path)?);
-    }
-    if let (Some(cert), Some(key)) = (args.tls_cert, args.tls_key) {
-        config.client_identity = Some(ClientIdentity::new(
-            std::fs::read(cert)?,
-            std::fs::read(key)?,
+    let files = CredentialFiles {
+        token: args.token_file,
+        ca: args.tls_ca,
+        cert: args.tls_cert,
+        key: args.tls_key,
+    };
+    let credentials = files.read()?;
+    let gateway = Arc::new(RpcGateway {
+        client: std::sync::RwLock::new(connect(&gateway_url, &credentials).await?),
+    });
+    if args.credential_reload_seconds > 0 {
+        tokio::spawn(reload_credentials(
+            Arc::clone(&gateway),
+            gateway_url.clone(),
+            files,
+            credentials,
+            Duration::from_secs(args.credential_reload_seconds),
         ));
     }
-    let gateway = Arc::new(RpcGateway {
-        client: tokio::time::timeout(CALL_TIMEOUT, OpenShellClient::connect(config))
-            .await
-            .map_err(|_| "gateway connection timed out")?
-            .map_err(|_| "gateway connection failed")?,
-    });
     let client = Client::try_default().await?;
+    let election = match args.leader_election_lease {
+        Some(name) => {
+            let identity = args
+                .leader_election_identity
+                .or_else(|| std::env::var("HOSTNAME").ok())
+                .filter(|identity| !identity.trim().is_empty())
+                .ok_or("--leader-election-identity is required")?;
+            let lease_duration = Duration::from_secs(args.lease_duration_seconds);
+            let leases: Api<Lease> = Api::namespaced(
+                client.clone(),
+                args.leader_election_namespace
+                    .as_deref()
+                    .unwrap_or(&namespace),
+            );
+            let election = Election {
+                name,
+                identity,
+                lease_duration,
+                retry_period: lease_duration / 3,
+            };
+            eprintln!(
+                "leader election: waiting for Lease {} as {}",
+                election.name, election.identity
+            );
+            election.acquire(&leases).await;
+            eprintln!("leader election: acquired Lease {}", election.name);
+            Some((election, leases))
+        }
+        None => None,
+    };
     let api = Api::namespaced(client.clone(), &namespace);
     let templates = Api::namespaced(client.clone(), &namespace);
     let providers: Api<OpenShellProvider> = Api::namespaced(client.clone(), &namespace);
@@ -1161,7 +1288,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .shutdown_on_signal()
         .run(reconcile_provider, error_policy, context)
         .for_each(|result| report(result.is_err()));
-    futures::join!(sandboxes, templates, providers);
+    let controllers = async {
+        futures::join!(sandboxes, templates, providers);
+    };
+    match &election {
+        Some((election, leases)) => {
+            tokio::select! {
+                () = controllers => election.release(leases).await,
+                LeaseLost = election.hold(leases) => {
+                    // Exit at once: the controllers must stop before another
+                    // replica can take the Lease.
+                    eprintln!("leader election: lost Lease {}; exiting", election.name);
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => controllers.await,
+    }
     Ok(())
 }
 
@@ -1318,7 +1461,7 @@ mod tests {
         let mut object = OpenShellSandbox::new(
             "agent",
             SandboxSpec {
-                workload_template: Some(TemplateRef {
+                template_ref: Some(TemplateRef {
                     name: "agent-v1".into(),
                     namespace: None,
                 }),

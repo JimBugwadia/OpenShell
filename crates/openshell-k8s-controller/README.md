@@ -1,6 +1,6 @@
 # Experimental Kubernetes controller
 
-This optional, single-replica controller translates namespaced
+This optional controller translates namespaced
 `openshell.ai/v1alpha1` `OpenShellSandbox` resources into existing gateway gRPC
 create, observe, and delete calls. The gateway remains the lifecycle owner.
 It does not provision Kubernetes workloads directly. For a walkthrough, see the
@@ -15,8 +15,22 @@ cargo run -p openshell-k8s-controller -- \
 
 `--print-crd` works without Kubernetes or gateway connections. Install its output
 as a CRD before running the controller. Kubernetes 1.29 or newer is the prototype
-baseline. Use one controller replica and one controller instance per namespace;
-there is no leader election or HA support.
+baseline. Run one controller instance per namespace. To run in the cluster,
+install the [Helm chart](../../deploy/helm/openshell-k8s-controller/README.md).
+
+With `--leader-election-lease <name>`, the controllers run only in the replica
+that holds that `coordination.k8s.io/v1` Lease, so several replicas can run
+with one active. The holder renews it every third of
+`--lease-duration-seconds` (default 15), exits if it can't renew before the
+Lease expires, and releases it on shutdown so a standby takes over at once.
+Every Lease write is conditional on its resource version.
+
+Every `--credential-reload-seconds` (default 30), the controller rereads its
+token, CA, and client certificate files. When they change, it connects with
+the new credentials and switches to the new connection; if that fails, it
+keeps the current connection and tries again. A Secret mounted as a volume
+without `subPath` changes atomically, so a rotated certificate takes effect
+without a restart.
 
 ```yaml
 apiVersion: openshell.ai/v1alpha1
@@ -36,13 +50,13 @@ metadata:
   name: support-agent
   namespace: agents
 spec:
-  workloadTemplate:
+  templateRef:
     name: support-agent
 ```
 
-`workloadTemplate.name` names an `OpenShellSandboxTemplate` in the same
+`templateRef.name` names an `OpenShellSandboxTemplate` in the same
 namespace or, if none exists, a workload template that already exists in the
-gateway workspace selected by `--workspace`. `workloadTemplate.namespace` is
+gateway workspace selected by `--workspace`. `templateRef.namespace` is
 optional and must match the sandbox's namespace; the controller blocks any
 other value with reason `TemplateNamespaceNotAllowed`. Instead of a template,
 `workload` describes the image, environment, and resources inline; setting both
@@ -222,7 +236,7 @@ status:
       createRequestId: fd229996-bc63-413e-9dc0-cc5f05abe5bd
       deleteRequestId: fd229996-bc63-413e-9dc0-cc5f05abe5bc
       createStartedAt: "2026-11-13T18:03:58Z"
-      workloadTemplate:
+      templateRef:
         name: support-agent-r1
     createAttempts: 1
     deleteAttempts: 0

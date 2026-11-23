@@ -1,0 +1,109 @@
+{{- /*
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+*/ -}}
+{{- include "openshell-k8s-controller.validate" . }}
+{{- $fullname := include "openshell-k8s-controller.fullname" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "openshell-k8s-controller.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "openshell-k8s-controller.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "openshell-k8s-controller.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "openshell-k8s-controller.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --namespace={{ include "openshell-k8s-controller.watchNamespace" . }}
+            - --workspace={{ .Values.gateway.workspace }}
+            - --gateway={{ .Values.gateway.url }}
+            - --max-concurrent-reconciles={{ .Values.maxConcurrentReconciles }}
+            - --report-gateway-phase={{ .Values.reportGatewayPhase }}
+            - --credential-reload-seconds={{ .Values.credentialReloadSeconds }}
+            {{- if .Values.leaderElection.enabled }}
+            - --leader-election-lease={{ $fullname }}
+            - --leader-election-namespace={{ .Release.Namespace }}
+            - --lease-duration-seconds={{ .Values.leaderElection.leaseDurationSeconds }}
+            {{- end }}
+            {{- if .Values.gateway.tls.secretName }}
+            - --tls-ca=/var/run/openshell/tls/ca.crt
+            - --tls-cert=/var/run/openshell/tls/tls.crt
+            - --tls-key=/var/run/openshell/tls/tls.key
+            {{- end }}
+            {{- if .Values.gateway.token.secretName }}
+            - --token-file=/var/run/openshell/token/{{ .Values.gateway.token.key }}
+            {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.gateway.tls.secretName }}
+            - name: gateway-tls
+              mountPath: /var/run/openshell/tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.gateway.token.secretName }}
+            - name: gateway-token
+              mountPath: /var/run/openshell/token
+              readOnly: true
+            {{- end }}
+      volumes:
+        {{- if .Values.gateway.tls.secretName }}
+        # Mounted without subPath, so a rotated Secret reaches the pod.
+        - name: gateway-tls
+          secret:
+            secretName: {{ .Values.gateway.tls.secretName }}
+        {{- end }}
+        {{- if .Values.gateway.token.secretName }}
+        - name: gateway-token
+          secret:
+            secretName: {{ .Values.gateway.token.secretName }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

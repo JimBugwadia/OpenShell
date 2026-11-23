@@ -17,5 +17,5 @@ metadata:
   name: support-agent-demo
   namespace: openshell-sandbox
 spec:
-  workloadTemplate:
+  templateRef:
     name: support-agent

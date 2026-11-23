@@ -12,7 +12,7 @@ ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${SCRIPT_DIR}/build-env.sh"
 
 usage() {
-  echo "Usage: stage-prebuilt-binaries.sh <gateway|sandbox|supervisor|supervisor-output|all>" >&2
+  echo "Usage: stage-prebuilt-binaries.sh <gateway|sandbox|supervisor|supervisor-output|k8s-controller|all>" >&2
 }
 
 normalize_arch() {
@@ -93,6 +93,9 @@ components_for_target() {
     supervisor|supervisor-output)
       echo "supervisor"
       ;;
+    k8s-controller)
+      echo "k8s-controller"
+      ;;
     all)
       echo "gateway sandbox supervisor"
       ;;
@@ -118,6 +121,11 @@ resolve_component() {
     supervisor)
       crate=openshell-supervisor
       binary=openshell-supervisor
+      target_libc=gnu
+      ;;
+    k8s-controller)
+      crate=openshell-k8s-controller
+      binary=openshell-k8s-controller
       target_libc=gnu
       ;;
     *)

@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v2
+name: openshell-k8s-controller
+description: Experimental controller that applies OpenShell Kubernetes resources through an OpenShell gateway
+type: application
+version: 0.0.0
+appVersion: "0.0.0"
