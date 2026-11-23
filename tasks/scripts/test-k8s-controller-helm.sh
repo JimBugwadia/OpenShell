@@ -4,8 +4,8 @@
 #
 # Installs the openshell-k8s-controller Helm chart in a throwaway kind cluster
 # and tests it against a gateway built from this checkout:
-#   1. The chart installs the CRDs and two replicas; exactly one holds the
-#      leader Lease.
+#   1. The chart installs the CRDs and, with replicaCount=2, two replicas;
+#      exactly one holds the leader Lease.
 #   2. A template and a sandbox become Ready through the in-cluster controller.
 #   3. Deleting the leader pod hands the Lease to another replica, which
 #      resumes without creating a duplicate sandbox.
@@ -218,7 +218,7 @@ helm --kubeconfig "${KCFG}" install "${RELEASE}" "${ROOT}/deploy/helm/openshell-
   --set gateway.url="https://host.docker.internal:${PORT}" \
   --set gateway.workspace="${WORKSPACE}" \
   --set gateway.tls.secretName=gateway-tls \
-  --set credentialReloadSeconds=5 >/dev/null
+  --set replicaCount=2 --set credentialReloadSeconds=5 >/dev/null
 kctl wait --for=condition=Established --timeout=60s crd/openshellsandboxes.openshell.ai \
   crd/openshellsandboxtemplates.openshell.ai crd/openshellproviders.openshell.ai >/dev/null
 has_leader() { [ -n "$(lease_holder)" ]; }

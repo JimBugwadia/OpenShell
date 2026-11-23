@@ -17,8 +17,10 @@ The chart installs:
   for the leader Lease in the release namespace.
 - The `openshell-sandbox-platform` and `openshell-sandbox-developer`
   ClusterRoles for people. Bind them per namespace with a RoleBinding.
-- A Deployment with two replicas. One replica holds the leader Lease and
-  reconciles; the other takes over if the leader stops.
+- A Deployment with one replica that reconciles while it holds a leader
+  Lease. The Lease keeps the old and new pods from reconciling at once during
+  a rolling update. Set `replicaCount` to 2 for a standby that takes over
+  within seconds if the leader stops.
 
 ## Before you install
 
@@ -75,7 +77,7 @@ again.
 | `gateway.token.secretName` | `""` | Secret with an OIDC bearer token, instead of or with a certificate. |
 | `gateway.token.key` | `token` | Key of the token in the Secret. |
 | `watchNamespace` | release namespace | Namespace whose OpenShell resources the release reconciles. |
-| `replicaCount` | `2` | Replicas. More than one requires `leaderElection.enabled`. |
+| `replicaCount` | `1` | Replicas. More than one requires `leaderElection.enabled`. |
 | `leaderElection.enabled` | `true` | Run the controllers only in the replica that holds the Lease. |
 | `leaderElection.leaseDurationSeconds` | `15` | How long the Lease stays valid without a renewal. |
 | `credentialReloadSeconds` | `10` | Seconds between checks for rotated credentials; `0` disables reloading. |

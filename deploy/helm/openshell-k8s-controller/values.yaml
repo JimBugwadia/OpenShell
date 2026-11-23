@@ -17,13 +17,15 @@ image:
 # -- Image pull Secrets for the controller pods.
 imagePullSecrets: []
 
-# -- Controller replicas. One replica is active at a time; the others wait
-# for the leader Lease. More than one replica requires leaderElection.enabled.
-replicaCount: 2
+# -- Controller replicas. One replica is active at a time, and a standby
+# only shortens failover, so one is usually enough. More than one replica
+# requires leaderElection.enabled.
+replicaCount: 1
 
 leaderElection:
   # -- Run the controllers only in the replica that holds a Lease in the
-  # release namespace.
+  # release namespace. Keep it enabled with one replica too: during a rolling
+  # update, it stops the old and new pods from reconciling at once.
   enabled: true
   # -- Seconds the Lease stays valid without a renewal. A standby takes over
   # within about this long after the leader stops.
