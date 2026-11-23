@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Roles for people and GitOps identities. Bind them per namespace with a
+# RoleBinding; neither role grants access to Secrets.
+#
+# Platform engineers manage the shared configuration that sandboxes use:
+# workload templates and providers. Grant Secret access separately, because a
+# provider can send any Secret in its namespace to the gateway.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openshell-sandbox-platform
+rules:
+  - apiGroups: ["openshell.ai"]
+    resources: ["openshellsandboxtemplates", "openshellproviders"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["openshell.ai"]
+    resources: ["openshellsandboxes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["openshell.ai"]
+    resources:
+      - "openshellsandboxes/status"
+      - "openshellsandboxtemplates/status"
+      - "openshellproviders/status"
+    verbs: ["get"]
+---
+# Developers declare sandboxes and read the templates and providers they can
+# use. They can't change templates or providers, or read their Secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openshell-sandbox-developer
+rules:
+  - apiGroups: ["openshell.ai"]
+    resources: ["openshellsandboxes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["openshell.ai"]
+    resources: ["openshellsandboxtemplates", "openshellproviders"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["openshell.ai"]
+    resources:
+      - "openshellsandboxes/status"
+      - "openshellsandboxtemplates/status"
+      - "openshellproviders/status"
+    verbs: ["get"]

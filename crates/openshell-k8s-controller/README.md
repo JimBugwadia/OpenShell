@@ -52,8 +52,10 @@ The spec also takes `providers` (gateway provider names), `command` (the
 agent's start command; the image's own command never runs), `restartPolicy`
 (`Never`, `OnFailure`, or `Always`), and `serviceExposures`. A provider name
 can be an `OpenShellProvider` in the same namespace or a provider that already
-exists in the gateway workspace. The controller doesn't create policies, and
-gateway default governance applies.
+exists in the gateway workspace. `policy` takes a sandbox policy inline, in
+the same format as a policy file for `openshell sandbox create --policy`; the
+controller validates it before submission and blocks an invalid policy with
+reason `PolicyInvalid`. Without `policy`, the gateway's default policy applies.
 The controller records these inputs in the journal so a replayed create sends
 the original request. The entire sandbox spec is immutable through a CEL
 admission transition rule. Reapplying equivalent content is allowed. Change the workload by creating a

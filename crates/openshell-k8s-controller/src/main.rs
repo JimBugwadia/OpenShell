@@ -115,8 +115,14 @@ fn sandbox_spec(inputs: &SandboxInputs) -> proto::SandboxSpec {
             ..Default::default()
         }
     });
+    // `SandboxSpec::refusal` blocks an invalid policy before submission.
+    let policy = inputs
+        .policy
+        .as_ref()
+        .and_then(|policy| openshell_policy::parse_sandbox_policy(&policy.to_string()).ok());
     proto::SandboxSpec {
         template,
+        policy,
         providers: inputs.providers.clone(),
         command: inputs.command.clone(),
         restart_policy: match inputs.restart_policy {
@@ -1543,6 +1549,16 @@ mod tests {
                 target_port: 8080,
                 authorization: Some(ServiceAuthorization::BearerPassthrough),
             }],
+            policy: Some(json!({
+                "version": 1,
+                "network_policies": {
+                    "github_api": {
+                        "name": "github-api-readonly",
+                        "endpoints": [{"host": "api.github.com", "port": 443}],
+                        "binaries": [{"path": "/usr/bin/curl"}]
+                    }
+                }
+            })),
         };
         let binding = Binding::new(
             "fd229996-bc63-413e-9dc0-cc5f05abe5bd",
@@ -1581,6 +1597,9 @@ mod tests {
             request.service_exposures[0].authorization_mode,
             i32::from(proto::ServiceAuthorizationMode::BearerPassthrough)
         );
+        let policy = spec.policy.expect("the policy is sent");
+        assert_eq!(policy.version, 1);
+        assert!(policy.network_policies.contains_key("github_api"));
     }
 
     #[test]

@@ -108,6 +108,19 @@ pub struct SandboxInputs {
     /// HTTP services in the sandbox to expose through gateway-managed URLs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub service_exposures: Vec<ServiceExposure>,
+    /// The sandbox policy, in the same format as `openshell sandbox create
+    /// --policy`. Omitting it applies the gateway's default policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "free_form_object")]
+    pub policy: Option<serde_json::Value>,
+}
+
+/// An object the API server stores as written; the controller validates it.
+fn free_form_object(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "x-kubernetes-preserve-unknown-fields": true
+    })
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -148,7 +161,13 @@ impl SandboxSpec {
             .as_ref()
             .and_then(|reference| reference.namespace.as_deref())
             .is_some_and(|ns| ns != namespace);
-        other_namespace.then_some("TemplateNamespaceNotAllowed")
+        if other_namespace {
+            return Some("TemplateNamespaceNotAllowed");
+        }
+        let invalid_policy = self.inputs.policy.as_ref().is_some_and(|policy| {
+            openshell_policy::parse_sandbox_policy(&policy.to_string()).is_err()
+        });
+        invalid_policy.then_some("PolicyInvalid")
     }
 }
 
@@ -336,6 +355,7 @@ fn ready_message(phase: &str, reason: &str) -> &'static str {
         "TemplateNamespaceNotAllowed" => {
             "The workload template must be in the sandbox's namespace."
         }
+        "PolicyInvalid" => "The sandbox policy isn't a valid OpenShell policy.",
         "AcceptedSandboxMissing" => "The gateway no longer reports the accepted sandbox.",
         "ObservationUnavailable" => "The controller cannot observe the gateway sandbox.",
         "IdentityMismatch" => "The gateway sandbox ID differs from the recorded ID.",
@@ -549,12 +569,13 @@ impl Missing {
 }
 
 /// Reasons that end submission: the spec is immutable, so retrying can't help.
-const REFUSED: [&str; 5] = [
+const REFUSED: [&str; 6] = [
     "NameCollision",
     "CreateRejected",
     "TemplateNotFound",
     "ProviderNotFound",
     "TemplateNamespaceNotAllowed",
+    "PolicyInvalid",
 ];
 
 #[derive(Debug, thiserror::Error)]

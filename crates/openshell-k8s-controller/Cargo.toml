@@ -18,6 +18,7 @@ futures = { workspace = true }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
 kube-runtime = { workspace = true }
+openshell-policy = { path = "../openshell-policy" }
 openshell-sdk = { path = "../openshell-sdk" }
 prost-types = { workspace = true }
 schemars = "1"

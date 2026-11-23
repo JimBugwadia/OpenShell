@@ -1,6 +1,7 @@
 # OpenShell Kubernetes controller prototype
 
-This package contains the namespaced RBAC and a sample `OpenShellSandboxTemplate`
+This package contains the controller's namespaced RBAC, ClusterRoles for
+platform engineers and developers, and a sample `OpenShellSandboxTemplate`
 and `OpenShellSandbox`. An `OpenShellProvider` declares a gateway provider whose
 credentials come from Kubernetes Secrets. The
 controller is run from the source checkout with Cargo; it intentionally has no
@@ -61,6 +62,28 @@ create/delete or access to other resources. Anyone who can create an
 in that namespace to the gateway, so keep unrelated Secrets elsewhere. The CRD is cluster-scoped; installing or upgrading it requires a
 separate administrator identity. Do not grant the controller cluster-wide
 permissions to install the CRD.
+
+### Roles for people
+
+`user-roles.yaml` defines two ClusterRoles to bind per namespace with a
+RoleBinding:
+
+- `openshell-sandbox-platform` manages `OpenShellSandboxTemplate` and
+  `OpenShellProvider` resources and reads sandboxes. Grant Secret access
+  separately to whoever manages provider credentials.
+- `openshell-sandbox-developer` manages `OpenShellSandbox` resources and reads
+  templates and providers.
+
+Neither role grants access to Secrets. Installing the ClusterRoles requires an
+administrator identity.
+
+```shell
+kubectl --context "$KUBE_CONTEXT" apply \
+  -f deploy/kubernetes-controller/user-roles.yaml
+kubectl --context "$KUBE_CONTEXT" create rolebinding agents-developers \
+  -n "$CONTROLLER_NAMESPACE" \
+  --clusterrole=openshell-sandbox-developer --group=<developer-group>
+```
 
 For host development, run the process with a kubeconfig identity granted the
 same Role permissions. The packaged service account and RoleBinding are ready

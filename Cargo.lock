@@ -4950,6 +4950,7 @@ dependencies = [
  "kube",
  "kube-runtime",
  "noyalib",
+ "openshell-policy",
  "openshell-sdk",
  "prost-types",
  "schemars",

@@ -7,7 +7,7 @@
 # Creates a throwaway kind cluster for the CRDs, plus a dedicated workspace on
 # an existing gateway, then walks through:
 #   1. Declare a provider backed by a Secret, a template, and a sandbox that
-#      uses both, and wait for all three to be Ready. Rotate the Secret and
+#      uses both and declares its policy inline, and wait for all three to be Ready. Rotate the Secret and
 #      confirm the controller reapplies the provider. Then measure the
 #      sandbox's etcd size and confirm a Ready sandbox causes no writes.
 #   2. Show the same sandbox through the gateway CLI and run a command in it.
@@ -227,6 +227,22 @@ spec:
   workloadTemplate:
     name: ${TEMPLATE}
   providers: [${PROVIDER}]
+  # The same format as a policy file for openshell sandbox create --policy.
+  policy:
+    version: 1
+    filesystem_policy:
+      include_workdir: true
+      read_only: [/bin, /usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log]
+      read_write: [/sandbox, /tmp, /dev/null]
+    landlock:
+      compatibility: best_effort
+    network_policies:
+      github_api:
+        name: github-api-readonly
+        endpoints:
+          - { host: api.github.com, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+        binaries:
+          - { path: /usr/bin/curl }
 EOF
 run kctl wait --for=condition=Ready --timeout=60s "osprov/${PROVIDER}" -n "${NAMESPACE}"
 run kctl wait --for=condition=Ready --timeout=60s "ossbxt/${TEMPLATE}" -n "${NAMESPACE}"
@@ -281,6 +297,9 @@ output="$(run os sandbox exec "${sandbox}" --workspace "${WORKSPACE}" --no-tty \
 echo "${output}"
 grep -q "hello from a CRD-managed sandbox" <<<"${output}" || fail "exec output missing"
 pass "command ran inside the sandbox"
+os policy get "${sandbox}" --workspace "${WORKSPACE}" --full 2>/dev/null | grep -q "api.github.com" \
+  || fail "the gateway sandbox doesn't have the declared policy"
+pass "the gateway sandbox has the policy declared in the resource"
 
 step "3. The workload template is immutable; changes are rejected at admission"
 if kctl patch ossbx support-agent -n "${NAMESPACE}" --type=merge \

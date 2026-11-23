@@ -350,9 +350,14 @@ fn generated_crd_uses_transition_cel_and_status_subresource() {
         "command",
         "restartPolicy",
         "serviceExposures",
+        "policy",
     ] {
         assert!(spec_schema["properties"][field].is_object(), "{field}");
     }
+    assert_eq!(
+        spec_schema["properties"]["policy"]["x-kubernetes-preserve-unknown-fields"],
+        true
+    );
     assert!(crd["spec"]["versions"][0]["subresources"]["status"].is_object());
 }
 
@@ -370,6 +375,26 @@ fn template_in_another_namespace_is_refused() {
     assert_eq!(
         spec(Some("platform-templates")).refusal("agents"),
         Some("TemplateNamespaceNotAllowed")
+    );
+}
+
+#[test]
+fn invalid_policy_is_refused() {
+    let spec = |policy: serde_json::Value| SandboxSpec {
+        workload_template: None,
+        inputs: SandboxInputs {
+            policy: Some(policy),
+            ..SandboxInputs::default()
+        },
+    };
+    assert_eq!(
+        spec(serde_json::json!({"version": 1, "filesystem_policy": {"read_only": ["/usr"]}}))
+            .refusal("agents"),
+        None
+    );
+    assert_eq!(
+        spec(serde_json::json!({"version": 1, "unknown_section": true})).refusal("agents"),
+        Some("PolicyInvalid")
     );
 }
 

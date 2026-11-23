@@ -85,6 +85,34 @@ if kctl auth can-i --quiet patch openshellsandboxes \
   exit 1
 fi
 
+kctl apply \
+  -f "${ROOT}/deploy/kubernetes-controller/user-roles.yaml"
+kctl create rolebinding platform-check -n "${NAMESPACE}" \
+  --clusterrole=openshell-sandbox-platform --user=platform-check
+kctl create rolebinding developer-check -n "${NAMESPACE}" \
+  --clusterrole=openshell-sandbox-developer --user=developer-check
+expect_can() {
+  if ! kctl auth can-i --quiet "$2" "$3" --as="$1" --namespace="${NAMESPACE}"; then
+    echo "ERROR: $1 can't $2 $3." >&2
+    exit 1
+  fi
+}
+expect_cannot() {
+  if kctl auth can-i --quiet "$2" "$3" --as="$1" --namespace="${NAMESPACE}"; then
+    echo "ERROR: $1 can unexpectedly $2 $3." >&2
+    exit 1
+  fi
+}
+expect_can platform-check create openshellproviders
+expect_can platform-check update openshellsandboxtemplates
+expect_cannot platform-check create openshellsandboxes
+expect_cannot platform-check get secrets
+expect_can developer-check create openshellsandboxes
+expect_can developer-check list openshellproviders
+expect_cannot developer-check create openshellproviders
+expect_cannot developer-check update openshellsandboxtemplates
+expect_cannot developer-check get secrets
+
 kctl create --dry-run=server -f - <<EOF
 apiVersion: openshell.ai/v1alpha1
 kind: OpenShellSandbox
@@ -112,6 +140,21 @@ then
   echo "ERROR: API server accepted both workloadTemplate and workload." >&2
   exit 1
 fi
+
+kctl create --dry-run=server -f - <<EOF
+apiVersion: openshell.ai/v1alpha1
+kind: OpenShellSandbox
+metadata:
+  name: inline-policy
+  namespace: ${NAMESPACE}
+spec:
+  workload:
+    image: registry.example.com/agent:1
+  policy:
+    version: 1
+    filesystem_policy:
+      read_only: [/usr]
+EOF
 
 kctl apply -f - <<EOF
 apiVersion: openshell.ai/v1alpha1
