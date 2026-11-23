@@ -39,7 +39,7 @@ hide = true
 
 ["build:docker:k8s-controller"]
 description = "Build the experimental Kubernetes controller image"
-run = "tasks/scripts/docker-build-image.sh k8s-controller"
+run = "tasks/scripts/build-k8s-controller-image.sh"
 hide = true
 
 ["docker:build:k8s-controller"]

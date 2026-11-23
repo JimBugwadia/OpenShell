@@ -64,7 +64,7 @@ issue_client_cert() {
 JSON
 }
 
-cargo build -q -p openshell-gateway --bin openshell-gateway -p openshell-cli -p openshell-k8s-controller \
+cargo build -q -p openshell-gateway --bin openshell-gateway -p openshell-cli \
   --manifest-path "${ROOT}/Cargo.toml"
 # generate-certs also copies client certificates into the CLI's configuration
 # directory; isolate it so the user's real CLI configuration is never touched.
@@ -116,7 +116,7 @@ printf '✔ gateway from this checkout on 127.0.0.1:%s; workspace agents is mana
 
 XDG_CONFIG_HOME="${STATE}/cli-controller" \
   DEMO_GATEWAY="${GW_NAME}" \
-  DEMO_GATEWAY_URL="https://127.0.0.1:${PORT}" \
+  DEMO_GATEWAY_URL="https://host.docker.internal:${PORT}" \
   DEMO_MTLS_DIR="${STATE}/cli-controller/openshell/gateways/${GW_NAME}/mtls" \
   DEMO_OTHER_CLI_CONFIG="${STATE}/cli-other" \
   OPENSHELL_CLI="${CLI_BIN}" \

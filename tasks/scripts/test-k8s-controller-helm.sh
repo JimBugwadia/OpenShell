@@ -15,8 +15,7 @@
 #   5. Deleting the resources removes them from the gateway, and uninstalling
 #      the release keeps the CRDs.
 #
-# Docker must be running. Without cargo-zigbuild, the script builds the Linux
-# controller binary in a rust container.
+# Docker must be running. build-k8s-controller-image.sh builds the image.
 #
 # Environment:
 #   HELM_TEST_PORT        gateway port (default: 18293)
@@ -130,31 +129,7 @@ set_tls_secret() {
 step "Build the gateway, the CLI, and the controller image"
 cargo build -q --locked -p openshell-gateway --bin openshell-gateway -p openshell-cli \
   --manifest-path "${ROOT}/Cargo.toml"
-case "$(docker info --format '{{.Architecture}}')" in
-  x86_64 | amd64) ARCH=amd64 ;;
-  aarch64 | arm64) ARCH=arm64 ;;
-  *) fail "unsupported Docker architecture" ;;
-esac
-STAGE="${ROOT}/deploy/docker/.build/prebuilt-binaries/${ARCH}"
-BASE_ARGS=()
-mkdir -p "${STAGE}"
-if [ -n "${K8S_CONTROLLER_BINARY:-}" ]; then
-  install -m 0755 "${K8S_CONTROLLER_BINARY}" "${STAGE}/openshell-k8s-controller"
-elif command -v cargo-zigbuild >/dev/null 2>&1; then
-  PREBUILT_ARCH="${ARCH}" "${ROOT}/tasks/scripts/stage-prebuilt-binaries.sh" k8s-controller
-else
-  # Without zig's static libunwind, the binary needs libgcc_s, which the
-  # default distroless base lacks; package it on the distroless cc base.
-  BASE_ARGS=(--build-arg "K8S_CONTROLLER_BASE_IMAGE=gcr.io/distroless/cc-debian13@sha256:532c7a94f9e96ba9db75eb9388f4227751131c7cb0a411d1a8521af4096135de")
-  toolchain="$(awk -F'"' '/^channel/ {print $2}' "${ROOT}/rust-toolchain.toml")"
-  docker run --rm -v "${ROOT}:/src" -w /src \
-    -v openshell-k8s-ctl-target:/target -v openshell-k8s-ctl-cargo:/usr/local/cargo/registry \
-    -e CARGO_TARGET_DIR=/target "rust:${toolchain}-bookworm" \
-    sh -c "cargo build -q --locked --release -p openshell-k8s-controller \
-      && install -m 0755 /target/release/openshell-k8s-controller /src/deploy/docker/.build/prebuilt-binaries/${ARCH}/"
-fi
-(cd "${ROOT}" && PREBUILT_AUTO_STAGE=0 IMAGE_TAG="${IMAGE_TAG}" DOCKER_PLATFORM="linux/${ARCH}" \
-  tasks/scripts/docker-build-image.sh k8s-controller ${BASE_ARGS[@]+"${BASE_ARGS[@]}"} >/dev/null)
+IMAGE_TAG="${IMAGE_TAG}" bash "${ROOT}/tasks/scripts/build-k8s-controller-image.sh" >/dev/null
 pass "built ${IMAGE}"
 
 step "Start a gateway whose workspace ${WORKSPACE} is managed by the controller identity"

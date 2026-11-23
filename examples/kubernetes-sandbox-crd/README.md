@@ -1,9 +1,11 @@
 # Kubernetes Sandbox CRD
 
 This walkthrough shows the experimental `OpenShellSandboxTemplate` and
-`OpenShellSandbox` controller and the gateway's workspace managers setting. It takes about 15 minutes. Part 1 runs the
-controller against an existing local gateway; Part 2 runs a gateway built from
-this checkout to show which identities can change sandboxes.
+`OpenShellSandbox` controller and the gateway's workspace managers setting. It
+takes about 15 minutes. Part 1 installs the controller in a kind cluster with
+its Helm chart and connects it to an existing local gateway; Part 2 runs a
+gateway built from this checkout to show which identities can change
+sandboxes.
 
 Each part also has a script that runs the same steps, checks every result, and
 cleans up. Add `DEMO_PAUSE=1` to pause between steps when you present.
@@ -17,11 +19,14 @@ DEMO_PAUSE=1 tasks/scripts/test-workspace-managers-gateway.sh # Part 2
 
 You need:
 
-- Docker, kind, kubectl, and a Rust toolchain.
-- For Part 1, a running OpenShell gateway registered with the CLI, using mTLS.
-  The commands below assume the gateway named `openshell` at
-  `https://localhost:17670`, with its client certificate in
-  `~/.config/openshell/gateways/openshell/mtls`.
+- Docker, kind, kubectl, and Helm. Part 2 also needs a Rust toolchain.
+- For Part 1, a running OpenShell gateway registered with the CLI, using mTLS,
+  such as one installed with Homebrew. The commands below assume the gateway
+  named `openshell` at `https://localhost:17670`, with its client certificate
+  in `~/.config/openshell/gateways/openshell/mtls`. The controller runs in a
+  kind pod and reaches the gateway at `host.docker.internal`, so the gateway's
+  server certificate must include that name, as the certificates that
+  `openshell-gateway generate-certs` creates do.
 - For Part 2, port 18291 free and the OpenShell 0.1.6 supervisor and sandbox
   images available to Docker.
 
@@ -33,9 +38,9 @@ directory.
 
 ### Step 0: set up
 
-Create a throwaway cluster for the CRDs, plus a dedicated gateway workspace.
-The cluster only stores the declaration; the sandbox runs
-wherever the gateway runs it.
+Create a throwaway cluster and a dedicated gateway workspace. The cluster only
+stores the declarations and runs the controller; the sandbox runs wherever the
+gateway runs it.
 
 ```shell
 export KUBECONFIG=$PWD/target/openshell-crd-demo.kubeconfig
@@ -46,41 +51,64 @@ kubectl create namespace agents
 openshell workspace create --name agents
 ```
 
-Build the controller and install its CRDs. The controller binary prints both
-CRDs, `OpenShellSandbox` and `OpenShellSandboxTemplate`, so the installed
-schema always matches the controller you run:
+No controller image is published yet, so build one and load it into the
+cluster. The script compiles the controller in a Rust container, so it needs
+only Docker; the first build takes a few minutes:
 
 ```shell
-cargo build -p openshell-k8s-controller
-target/debug/openshell-k8s-controller --print-crd | kubectl apply -f -
-kubectl wait --for=condition=Established \
-  crd/openshellsandboxes.openshell.ai crd/openshellsandboxtemplates.openshell.ai
-kubectl get crd | grep openshell.ai
+IMAGE_TAG=demo tasks/scripts/build-k8s-controller-image.sh
+kind load docker-image openshell/k8s-controller:demo --name openshell-crd-demo
 ```
 
-The last command lists both CRDs:
+### Step 1: install the controller
 
-```text
-openshellsandboxes.openshell.ai          2026-11-19T00:00:00Z
-openshellsandboxtemplates.openshell.ai   2026-11-19T00:00:00Z
+The controller authenticates to the gateway with a client certificate. This
+demo reuses your CLI's certificate; in production, issue the controller its
+own and list it as the workspace manager, as Part 2 shows. Store the
+certificate in a Secret:
+
+```shell
+kubectl create secret generic gateway-tls -n agents \
+  --from-file=ca.crt="$MTLS/ca.crt" \
+  --from-file=tls.crt="$MTLS/tls.crt" \
+  --from-file=tls.key="$MTLS/tls.key"
 ```
 
-In a second terminal, from the same checkout, start the controller.
-One controller binds one namespace to one gateway workspace. The demo gives
-both the same name, `agents`, but the controller never derives one from the
-other: the administrator who starts the controller sets the binding with
-`--namespace` and `--workspace`, so creating a namespace can't select a
+Install the chart. One release binds one namespace to one gateway workspace.
+The demo gives both the same name, `agents`, but the controller never derives
+one from the other: the administrator who installs the release sets the
+binding with `gateway.workspace`, so creating a namespace can't select a
 gateway workspace.
 
 ```shell
-export KUBECONFIG=$PWD/target/openshell-crd-demo.kubeconfig
-MTLS=~/.config/openshell/gateways/openshell/mtls
-target/debug/openshell-k8s-controller \
-  --namespace agents --workspace agents --gateway https://localhost:17670 \
-  --tls-ca "$MTLS/ca.crt" --tls-cert "$MTLS/tls.crt" --tls-key "$MTLS/tls.key"
+helm install openshell-controller deploy/helm/openshell-k8s-controller \
+  --namespace agents --wait \
+  --set image.repository=openshell/k8s-controller \
+  --set image.tag=demo \
+  --set image.pullPolicy=Never \
+  --set gateway.url=https://host.docker.internal:17670 \
+  --set gateway.workspace=agents \
+  --set gateway.tls.secretName=gateway-tls
+kubectl get crd | grep openshell.ai
+kubectl logs -n agents deployment/openshell-controller-openshell-k8s-controller
 ```
 
-### Step 1: declare a provider, a template, and a sandbox
+The chart installs the three CRDs, and the log shows that the controller took
+its leader Lease:
+
+```text
+openshellproviders.openshell.ai          2026-11-23T00:00:00Z
+openshellsandboxes.openshell.ai          2026-11-23T00:00:00Z
+openshellsandboxtemplates.openshell.ai   2026-11-23T00:00:00Z
+leader election: waiting for Lease openshell-controller-openshell-k8s-controller as openshell-controller-openshell-k8s-controller-7d9c5b7f4-x2kqv
+leader election: acquired Lease openshell-controller-openshell-k8s-controller
+```
+
+If the controller can't reach the gateway, the pod restarts and its log
+says "gateway connection failed". Check that the gateway is running and that
+its certificate includes `host.docker.internal`.
+
+### Step 2: declare a provider, a template, and a sandbox
 
 The provider holds the agent's GitHub credential by reference to a Secret. The
 template holds the reviewed workload: its image and settings. The sandbox names
@@ -164,7 +192,7 @@ showing the value.
 Point out: `kubectl wait --for=condition=Ready` works, so Argo CD and Flux can
 assess health without custom scripts.
 
-### Step 2: see the same sandbox through the gateway
+### Step 3: see the same sandbox through the gateway
 
 ```shell
 NAME=$(kubectl get ossbx support-agent -n agents -o jsonpath='{.status.sandboxName}')
@@ -175,7 +203,7 @@ openshell sandbox exec "$NAME" --workspace agents --no-tty -- echo "hello from a
 Point out: the gateway record carries `kubernetes.openshell.ai/namespace`,
 `name`, and `uid` annotations that point back to the resource.
 
-### Step 3: try to change the workload
+### Step 4: try to change the workload
 
 ```shell
 kubectl patch ossbx support-agent -n agents --type=merge \
@@ -188,7 +216,7 @@ to run a different workload. The prototype makes the whole spec immutable;
 later versions can allow in-place changes to other fields, such as policy and
 providers, while the workload stays immutable.
 
-### Step 4: change the template
+### Step 5: change the template
 
 ```shell
 kubectl patch ossbxt demo-agent -n agents --type=merge \
@@ -204,11 +232,13 @@ Expected: the gateway lists `demo-agent-r1` and `demo-agent-r2`, and
 place, so each template change publishes a new revision. New sandboxes get the
 latest revision; running sandboxes keep the one they started with.
 
-### Step 5: restart the controller
+### Step 6: restart the controller
 
-Stop the controller with Ctrl+C and start it again, then:
+Replace the controller pod, then check the sandbox:
 
 ```shell
+kubectl rollout restart deployment/openshell-controller-openshell-k8s-controller -n agents
+kubectl rollout status deployment/openshell-controller-openshell-k8s-controller -n agents
 kubectl get ossbx support-agent -n agents \
   -o jsonpath='{.status.sandboxId} attempts={.status.journal.createAttempts}{"\n"}'
 ```
@@ -216,7 +246,7 @@ kubectl get ossbx support-agent -n agents \
 Expected: the same sandbox ID and `attempts=1`. The controller resumes from the
 journal in status and replays nothing that already succeeded.
 
-### Step 6: request a template that doesn't exist
+### Step 7: request a template that doesn't exist
 
 ```shell
 cat <<EOF | kubectl apply -f -
@@ -237,7 +267,7 @@ kubectl delete ossbx missing-template -n agents
 Expected: `Blocked` with reason `TemplateNotFound`, and the delete completes
 without removing the finalizer by hand, because no gateway record can exist.
 
-### Step 7: measure the etcd footprint
+### Step 8: measure the etcd footprint
 
 ```shell
 kubectl -n kube-system exec etcd-openshell-crd-demo-control-plane -- etcdctl \
@@ -249,7 +279,7 @@ kubectl -n kube-system exec etcd-openshell-crd-demo-control-plane -- etcdctl \
 Expected: about 2,800 bytes. A Ready sandbox causes no further writes; the
 script checks this by watching the resource for 45 seconds.
 
-### Step 8: delete the sandbox, the provider, and the template
+### Step 9: delete the sandbox, the provider, and the template
 
 ```shell
 kubectl get ossbx support-agent -n agents -o jsonpath='{.metadata.finalizers}{"\n"}'
@@ -268,9 +298,11 @@ sandboxes: the gateway refuses to delete a provider that a sandbox uses.
 
 ### Clean up
 
-Stop the controller, then:
+Delete the provider profile first: a workspace that still holds one never
+finishes deleting. Deleting the cluster removes the controller.
 
 ```shell
+openshell provider profile delete github --workspace agents
 openshell workspace delete agents
 kind delete cluster --name openshell-crd-demo --kubeconfig "$KUBECONFIG"
 ```

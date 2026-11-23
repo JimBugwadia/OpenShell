@@ -4,8 +4,9 @@
 #
 # End-to-end demo and test of the experimental OpenShellSandbox controller.
 #
-# Creates a throwaway kind cluster for the CRDs, plus a dedicated workspace on
-# an existing gateway, then walks through:
+# Creates a throwaway kind cluster, plus a dedicated workspace on an existing
+# gateway, builds the controller image, and installs it with its Helm chart.
+# Then it walks through:
 #   1. Declare a provider backed by a Secret, a template, and a sandbox that
 #      uses both and declares its policy inline, and wait for all three to be Ready. Rotate the Secret and
 #      confirm the controller reapplies the provider. Then measure the
@@ -22,8 +23,10 @@
 #
 # Environment:
 #   DEMO_GATEWAY       Registered CLI gateway name (default: openshell)
-#   DEMO_GATEWAY_URL   Gateway URL for the controller (default: from the CLI registration)
-#   DEMO_MTLS_DIR      Directory with ca.crt, tls.crt, tls.key
+#   DEMO_GATEWAY_URL   Gateway URL as the controller pod reaches it (default:
+#                      the CLI registration's URL, with localhost or 127.0.0.1
+#                      replaced by host.docker.internal)
+#   DEMO_MTLS_DIR      Directory with ca.crt, tls.crt, tls.key for the controller
 #                      (default: ~/.config/openshell/gateways/$DEMO_GATEWAY/mtls)
 #   DEMO_IMAGE         Template image (default: nvcr.io/nvidia/base/ubuntu:24.04)
 #   DEMO_PAUSE=1       Pause between steps for a live walkthrough
@@ -47,9 +50,10 @@ TEMPLATE="crd-demo-agent"
 PROVIDER="crd-demo-github"
 IMAGE="${DEMO_IMAGE:-nvcr.io/nvidia/base/ubuntu:24.04}"
 KCFG="${ROOT}/target/${CLUSTER}.kubeconfig"
-CONTROLLER_LOG="${ROOT}/target/${CLUSTER}-controller.log"
 WATCH_LOG="${ROOT}/target/${CLUSTER}-watch.log"
-CONTROLLER="${ROOT}/target/debug/openshell-k8s-controller"
+RELEASE=openshell-controller
+DEPLOYMENT="${RELEASE}-openshell-k8s-controller"
+CONTROLLER_IMAGE_TAG=demo
 
 bold=$'\033[1m'; green=$'\033[32m'; red=$'\033[31m'; dim=$'\033[2m'; reset=$'\033[0m'
 [ -t 1 ] || { bold=; green=; red=; dim=; reset=; }
@@ -67,14 +71,17 @@ tp() { kctl get openshellsandboxtemplate "$1" -n "${NAMESPACE}" -o "jsonpath=$2"
 pp() { kctl get openshellprovider "$1" -n "${NAMESPACE}" -o "jsonpath=$2"; }
 revisions() { os sandbox template list --workspace "${WORKSPACE}" 2>/dev/null | awk 'NR > 1 {print $1}' | grep -c "^${TEMPLATE}-r" || true; }
 
-for command in cargo kind kubectl docker "${CLI}"; do
+for command in kind kubectl helm docker "${CLI}"; do
   command -v "${command}" >/dev/null 2>&1 || fail "required command not found: ${command}"
 done
 for file in ca.crt tls.crt tls.key; do
   [ -f "${MTLS_DIR}/${file}" ] || fail "missing ${MTLS_DIR}/${file}; set DEMO_MTLS_DIR"
 done
+# The controller runs in a kind pod, which reaches the host's gateway through
+# Docker's host alias. The gateway's certificate must include that name.
 GATEWAY_URL="${DEMO_GATEWAY_URL:-$("${CLI}" gateway list 2>/dev/null \
-  | awk -v gw="${GW}" '{sub(/^\*/, "")} $1 == gw {print $2}')}"
+  | awk -v gw="${GW}" '{sub(/^\*/, "")} $1 == gw {print $2}' \
+  | sed -E 's#//(localhost|127\.0\.0\.1)([:/]|$)#//host.docker.internal\2#')}"
 [ -n "${GATEWAY_URL}" ] || fail "cannot resolve the URL for gateway ${GW}; set DEMO_GATEWAY_URL"
 if kind get clusters 2>/dev/null | grep -Fxq "${CLUSTER}"; then
   fail "kind cluster ${CLUSTER} already exists; delete it or rerun later"
@@ -85,34 +92,21 @@ if os workspace get "${WORKSPACE}" >/dev/null 2>&1; then
 fi
 mkdir -p "${ROOT}/target"
 
-created_cluster=0 created_workspace=0 imported_profile=0 controller_pid= watch_pid=
+created_cluster=0 created_workspace=0 imported_profile=0 watch_pid=''
 resources=() templates=() providers=() sandbox_names=()
-
-stop_controller() {
-  if [ -n "${controller_pid}" ]; then
-    kill "${controller_pid}" 2>/dev/null || true
-    wait "${controller_pid}" 2>/dev/null || true
-    controller_pid=
-  fi
-}
-
-start_controller() {
-  KUBECONFIG="${KCFG}" "${CONTROLLER}" \
-    --namespace "${NAMESPACE}" --workspace "${WORKSPACE}" --gateway "${GATEWAY_URL}" \
-    --tls-ca "${MTLS_DIR}/ca.crt" --tls-cert "${MTLS_DIR}/tls.crt" --tls-key "${MTLS_DIR}/tls.key" \
-    >>"${CONTROLLER_LOG}" 2>&1 &
-  controller_pid=$!
-  sleep 2
-  ps -p "${controller_pid}" >/dev/null || fail "controller exited during startup (see ${CONTROLLER_LOG})"
-}
 
 cleanup() {
   result=$?
   trap - EXIT INT TERM
   printf '\n%s==> Cleaning up%s\n' "${bold}" "${reset}"
+  if [ "${result}" -ne 0 ] && [ "${created_cluster}" = "1" ]; then
+    echo "--- controller log ---" >&2
+    kctl logs -n "${NAMESPACE}" "deployment/${DEPLOYMENT}" --tail=40 >&2 2>/dev/null || true
+  fi
+  # The controller keeps running until the cluster is deleted, so the
+  # finalizers can remove the gateway objects.
   for resource in "${resources[@]+"${resources[@]}"}"; do
     if kctl get openshellsandbox "${resource}" -n "${NAMESPACE}" >/dev/null 2>&1; then
-      [ -n "${controller_pid}" ] || start_controller || true
       kctl delete openshellsandbox "${resource}" -n "${NAMESPACE}" --timeout=120s >/dev/null 2>&1 \
         || echo "WARNING: finalizer cleanup for ${resource} did not finish." >&2
     fi
@@ -120,7 +114,6 @@ cleanup() {
   # Delete providers after sandboxes; the gateway refuses to delete one in use.
   for provider in "${providers[@]+"${providers[@]}"}"; do
     if kctl get openshellprovider "${provider}" -n "${NAMESPACE}" >/dev/null 2>&1; then
-      [ -n "${controller_pid}" ] || start_controller || true
       kctl delete openshellprovider "${provider}" -n "${NAMESPACE}" --timeout=120s >/dev/null 2>&1 \
         || echo "WARNING: finalizer cleanup for provider ${provider} did not finish." >&2
     fi
@@ -128,12 +121,10 @@ cleanup() {
   # Delete templates after sandboxes, so the controller removes their revisions last.
   for template in "${templates[@]+"${templates[@]}"}"; do
     if kctl get openshellsandboxtemplate "${template}" -n "${NAMESPACE}" >/dev/null 2>&1; then
-      [ -n "${controller_pid}" ] || start_controller || true
       kctl delete openshellsandboxtemplate "${template}" -n "${NAMESPACE}" --timeout=120s >/dev/null 2>&1 \
         || echo "WARNING: finalizer cleanup for template ${template} did not finish." >&2
     fi
   done
-  stop_controller
   [ -n "${watch_pid}" ] && kill "${watch_pid}" 2>/dev/null
   rm -f "${WATCH_LOG}"
   # Fall back to the CLI only for gateway sandboxes this demo created.
@@ -163,11 +154,6 @@ cleanup() {
       rm -f "${KCFG}"
     fi
   fi
-  if [ "${result}" -ne 0 ] && [ -f "${CONTROLLER_LOG}" ]; then
-    echo "--- controller log ---" >&2
-    cat "${CONTROLLER_LOG}" >&2
-  fi
-  rm -f "${CONTROLLER_LOG}"
   [ "${result}" -eq 0 ] && printf '\n%sPASS: controller demo completed.%s\n' "${green}" "${reset}"
   exit "${result}"
 }
@@ -176,22 +162,36 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # ---------------------------------------------------------------------------
-step "Set up: kind cluster and a dedicated gateway workspace"
-echo "Gateway ${GW} at ${GATEWAY_URL}; workspace ${WORKSPACE}"
+step "Set up: kind cluster, a dedicated gateway workspace, and the controller image"
+echo "Gateway ${GW}; the controller reaches it at ${GATEWAY_URL}; workspace ${WORKSPACE}"
 created_cluster=1
 run kind create cluster --name "${CLUSTER}" --kubeconfig "${KCFG}" --wait 120s >/dev/null
 kctl create namespace "${NAMESPACE}" >/dev/null
 run os workspace create --name "${WORKSPACE}" >/dev/null
 created_workspace=1
-run cargo build --locked -q -p openshell-k8s-controller --manifest-path "${ROOT}/Cargo.toml"
+run env IMAGE_TAG="${CONTROLLER_IMAGE_TAG}" bash "${ROOT}/tasks/scripts/build-k8s-controller-image.sh"
+run kind load docker-image "openshell/k8s-controller:${CONTROLLER_IMAGE_TAG}" --name "${CLUSTER}" >/dev/null
 
-step "Install the CRDs generated by the controller binary"
-"${CONTROLLER}" --print-crd | kctl apply -f - >/dev/null
+step "Install the controller with its Helm chart"
+# The controller authenticates to the gateway with this client certificate.
+kctl create secret generic gateway-tls -n "${NAMESPACE}" --from-file=ca.crt="${MTLS_DIR}/ca.crt" \
+  --from-file=tls.crt="${MTLS_DIR}/tls.crt" --from-file=tls.key="${MTLS_DIR}/tls.key" >/dev/null
+run helm --kubeconfig "${KCFG}" install "${RELEASE}" "${ROOT}/deploy/helm/openshell-k8s-controller" \
+  --namespace "${NAMESPACE}" --wait --timeout 120s \
+  --set image.repository=openshell/k8s-controller --set image.tag="${CONTROLLER_IMAGE_TAG}" \
+  --set image.pullPolicy=Never \
+  --set gateway.url="${GATEWAY_URL}" --set gateway.workspace="${WORKSPACE}" \
+  --set gateway.tls.secretName=gateway-tls >/dev/null
 run kctl wait --for=condition=Established --timeout=60s \
   crd/openshellsandboxes.openshell.ai crd/openshellsandboxtemplates.openshell.ai \
   crd/openshellproviders.openshell.ai
-start_controller
-pass "controller running (pid ${controller_pid}), bound to ${NAMESPACE} -> ${WORKSPACE}"
+for _ in $(seq 30); do
+  kctl logs -n "${NAMESPACE}" "deployment/${DEPLOYMENT}" 2>/dev/null | grep -q "acquired Lease" && break
+  sleep 1
+done
+kctl logs -n "${NAMESPACE}" "deployment/${DEPLOYMENT}" | grep -q "acquired Lease" \
+  || fail "the controller didn't start reconciling"
+pass "controller deployed with Helm, bound to ${NAMESPACE} -> ${WORKSPACE}"
 
 # ---------------------------------------------------------------------------
 step "1. Declare a provider, a template, and a sandbox that uses both"
@@ -353,9 +353,14 @@ pass "template published ${TEMPLATE}-r2; support-agent still runs ${TEMPLATE}-r1
 
 step "5. Restart the controller; it resumes from the status journal without duplicating work"
 attempts_before="$(jp support-agent '{.status.journal.createAttempts}')"
-stop_controller
-start_controller
-sleep 5
+run kctl rollout restart "deployment/${DEPLOYMENT}" -n "${NAMESPACE}"
+run kctl rollout status "deployment/${DEPLOYMENT}" -n "${NAMESPACE}" --timeout=120s
+for _ in $(seq 30); do
+  kctl logs -n "${NAMESPACE}" "deployment/${DEPLOYMENT}" 2>/dev/null | grep -q "acquired Lease" && break
+  sleep 1
+done
+# Give the new controller time to reconcile the existing resources.
+sleep 10
 [ "$(jp support-agent '{.status.sandboxId}')" = "${sandbox_id}" ] || fail "sandbox ID changed after restart"
 [ "$(jp support-agent '{.status.journal.createAttempts}')" = "${attempts_before}" ] \
   || fail "controller submitted another create after restart"
