@@ -139,7 +139,8 @@ the current generation.
   template with reason `NameCollision`; it's never adopted.
 - Deleting the template resource deletes all its revisions. Sandboxes keep the
   workload they were created with. Old revisions otherwise stay until then.
-- The controller identity must be a workspace admin to publish templates.
+- The controller identity must be a workspace admin to publish templates and,
+  in a managed workspace, one of its managers.
 
 ## Providers
 
@@ -245,19 +246,22 @@ omit it, so a sandbox sleeping and waking causes no status writes. To wait for r
 kubectl wait --for=condition=Ready openshellsandbox/support-agent -n agents
 ```
 
-## Sandbox managers
+## Workspace managers
 
 List the controller's identity, for example `mtls:<certificate CN>` or
-`oidc:<token sub>`, as the sandbox manager of the workspace bound with
-`--workspace`, in the gateway's `[openshell.gateway.sandbox_managers]` table.
-The gateway then rejects sandbox changes in that workspace from every other
-caller, so each sandbox there has one writer and a resource, while the CLI and
-SDK can still list sandboxes, read logs, and exec. Other workspaces on the same
-gateway keep their own rules. See `sandbox_managers` in the gateway
-configuration reference. If the controller isn't a manager of its workspace,
-creates fail with reason `CreateRejected`. When several controllers share a
-workspace, each one can change only the sandboxes it created. The gateway
-refuses to start if you change a workspace's list while it has sandboxes.
+`oidc:<token sub>`, as a workspace manager of the workspace bound with
+`--workspace`, in the gateway's `[openshell.gateway.workspace_managers]` table.
+The gateway then rejects changes to sandboxes, workload templates, and
+providers in that workspace from every other caller, so each of them has one
+writer and a resource, while the CLI and SDK can still list sandboxes, read
+logs, and exec. Other workspaces on the same gateway keep their own rules. See
+`workspace_managers` in the gateway configuration reference. If the controller
+isn't a manager of its workspace, sandbox creates fail with `CreateRejected`,
+template publishes with `PublishRejected`, and provider applies with
+`ProviderRejected`. When several controllers share a workspace, each one can
+change only the sandboxes, templates, and providers it created. The gateway
+refuses to start if you change a workspace's list while it has sandboxes,
+templates, or providers.
 
 Each gateway sandbox carries `kubernetes.openshell.ai/namespace`, `name`, and
 `uid` annotations that point back to its resource. They are informational; the
@@ -265,7 +269,7 @@ controller never infers ownership from them.
 
 ## Safety limits
 
-Without a `sandbox_managers` entry for its workspace, this is not
+Without a `workspace_managers` entry for its workspace, this is not
 gateway-enforced ownership. Existing public `DeleteSandbox` accepts
 only a name and has no caller-supplied ID/resource-version precondition. The
 controller checks the recorded ID immediately before deletion, but a concurrent

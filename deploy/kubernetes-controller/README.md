@@ -18,7 +18,8 @@ For a step-by-step walkthrough on a local kind cluster, see the
 - Rust toolchain and Cargo from the repository's `rust-toolchain.toml`.
 - An OpenShell gateway reachable from the controller process.
 - A controller identity that is a workspace admin in the gateway workspace, so
-  it can publish template revisions and manage providers. A sandbox can
+  it can publish template revisions and manage providers. In a workspace with
+  workspace managers, the identity must also be one of them. A sandbox can
   instead name a workload template or provider that already exists in the
   gateway.
 
@@ -186,10 +187,10 @@ kubectl --context "$KUBE_CONTEXT" delete openshellsandbox support-agent-demo \
   missing/stopped sandbox, starts an explicitly stopped sandbox, or overwrites
   explicit gateway lifecycle state. Gateway errors and uncertain outcomes may
   leave a resource blocked for operator action.
-- List the controller's identity as the sandbox manager of its workspace in
-  the gateway's `[openshell.gateway.sandbox_managers]` table, so only the
-  controller can change that workspace's sandboxes. Without an entry, any
-  authorized caller can.
+- List the controller's identity as a workspace manager of its workspace in
+  the gateway's `[openshell.gateway.workspace_managers]` table, so only the
+  controller can change that workspace's sandboxes, workload templates, and
+  providers. Without an entry, any authorized caller can.
 - The gateway's `DeleteSandbox` API has no ID/version precondition. The
   controller checks the recorded sandbox ID immediately before deletion, but
   cannot close the race with a concurrent external replacement. Reserve the
