@@ -27,6 +27,7 @@
 #                      (default: ~/.config/openshell/gateways/$DEMO_GATEWAY/mtls)
 #   DEMO_IMAGE         Template image (default: nvcr.io/nvidia/base/ubuntu:24.04)
 #   DEMO_PAUSE=1       Pause between steps for a live walkthrough
+#   DEMO_CLUSTER       kind cluster name (default: openshell-crd-demo)
 #   DEMO_KEEP_CLUSTER=1  Keep the kind cluster afterward
 #   OPENSHELL_CLI      CLI binary (default: openshell)
 set -euo pipefail
@@ -36,7 +37,7 @@ GW="${DEMO_GATEWAY:-openshell}"
 CLI="${OPENSHELL_CLI:-openshell}"
 MTLS_DIR="${DEMO_MTLS_DIR:-${HOME}/.config/openshell/gateways/${GW}/mtls}"
 TIMEOUT="${DEMO_TIMEOUT:-300}"
-CLUSTER=openshell-crd-demo
+CLUSTER="${DEMO_CLUSTER:-openshell-crd-demo}"
 NAMESPACE=agents
 WORKSPACE="${NAMESPACE}"
 TEMPLATE="crd-demo-agent"
