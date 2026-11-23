@@ -28,8 +28,11 @@
 #   DEMO_IMAGE         Template image (default: nvcr.io/nvidia/base/ubuntu:24.04)
 #   DEMO_PAUSE=1       Pause between steps for a live walkthrough
 #   DEMO_CLUSTER       kind cluster name (default: openshell-crd-demo)
+#   DEMO_NAMESPACE     Namespace and gateway workspace (default: agents)
 #   DEMO_KEEP_CLUSTER=1  Keep the kind cluster afterward
 #   OPENSHELL_CLI      CLI binary (default: openshell)
+#   DEMO_OTHER_CLI_CONFIG  XDG config directory for a second CLI identity; if
+#                      set, checks that it can't change the controller's objects
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -38,7 +41,7 @@ CLI="${OPENSHELL_CLI:-openshell}"
 MTLS_DIR="${DEMO_MTLS_DIR:-${HOME}/.config/openshell/gateways/${GW}/mtls}"
 TIMEOUT="${DEMO_TIMEOUT:-300}"
 CLUSTER="${DEMO_CLUSTER:-openshell-crd-demo}"
-NAMESPACE=agents
+NAMESPACE="${DEMO_NAMESPACE:-agents}"
 WORKSPACE="${NAMESPACE}"
 TEMPLATE="crd-demo-agent"
 PROVIDER="crd-demo-github"
@@ -82,7 +85,7 @@ if os workspace get "${WORKSPACE}" >/dev/null 2>&1; then
 fi
 mkdir -p "${ROOT}/target"
 
-created_cluster=0 created_workspace=0 controller_pid= watch_pid=
+created_cluster=0 created_workspace=0 imported_profile=0 controller_pid= watch_pid=
 resources=() templates=() providers=() sandbox_names=()
 
 stop_controller() {
@@ -140,8 +143,18 @@ cleanup() {
       os sandbox delete "${name}" --workspace "${WORKSPACE}" >/dev/null 2>&1 || result=1
     fi
   done
+  # A workspace with a profile in it never finishes deleting.
+  [ "${imported_profile}" = "1" ] && { os provider profile delete github --workspace "${WORKSPACE}" >/dev/null 2>&1 \
+    || echo "WARNING: could not delete provider profile github." >&2; }
   [ "${created_workspace}" = "1" ] && { os workspace delete "${WORKSPACE}" >/dev/null 2>&1 \
     || echo "WARNING: could not delete workspace ${WORKSPACE}." >&2; }
+  if [ "${created_workspace}" = "1" ]; then
+    for _ in $(seq 30); do os workspace get "${WORKSPACE}" >/dev/null 2>&1 || break; sleep 1; done
+    if os workspace get "${WORKSPACE}" >/dev/null 2>&1; then
+      echo "ERROR: workspace ${WORKSPACE} is still terminating; something in it was left behind." >&2
+      result=1
+    fi
+  fi
   if [ "${created_cluster}" = "1" ]; then
     if [ "${DEMO_KEEP_CLUSTER:-0}" = "1" ]; then
       echo "Kept kind cluster ${CLUSTER}; kubeconfig: ${KCFG}"
@@ -185,6 +198,7 @@ step "1. Declare a provider, a template, and a sandbox that uses both"
 # The provider type must exist in the workspace. The token is a placeholder:
 # the demo never calls GitHub.
 run os provider profile import -f "${ROOT}/providers/github.yaml" --workspace "${WORKSPACE}" >/dev/null
+imported_profile=1
 run kctl create secret generic "${PROVIDER}-token" -n "${NAMESPACE}" \
   --from-literal=token=demo-placeholder-1 >/dev/null
 providers+=("${PROVIDER}")
@@ -271,6 +285,22 @@ done
 [ "$(pp "${PROVIDER}" "{.status.secretVersions.${PROVIDER}-token}")" != "${version}" ] \
   || fail "provider was not reapplied after the Secret changed"
 pass "gateway provider ${PROVIDER} created from its Secret and reapplied after rotation"
+
+if [ -n "${DEMO_OTHER_CLI_CONFIG:-}" ]; then
+  step "Another identity can't change the controller's sandbox or provider"
+  other() { XDG_CONFIG_HOME="${DEMO_OTHER_CLI_CONFIG}" "${CLI}" -g "${GW}" "$@"; }
+  if output="$(other sandbox delete "${sandbox}" --workspace "${WORKSPACE}" 2>&1)"; then
+    fail "another identity deleted the controller's sandbox"
+  fi
+  echo "${output}" | tr -s ' \n' ' ' | cut -c1-200
+  if output="$(other provider delete "${PROVIDER}" --workspace "${WORKSPACE}" 2>&1)"; then
+    fail "another identity deleted the controller's provider"
+  fi
+  echo "${output}" | tr -s ' \n' ' ' | cut -c1-200
+  os sandbox get "${sandbox}" --workspace "${WORKSPACE}" >/dev/null || fail "the sandbox is gone"
+  os provider get "${PROVIDER}" --workspace "${WORKSPACE}" >/dev/null || fail "the provider is gone"
+  pass "the workspace manager's sandbox and provider are unchanged"
+fi
 
 step "Scale check: etcd footprint and write count for one sandbox"
 writes() { grep -c '^support-agent ' "${WATCH_LOG}" || true; }
