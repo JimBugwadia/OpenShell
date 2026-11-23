@@ -173,10 +173,11 @@ pub struct GatewayFileSection {
     /// Explicit activation only after the compatible deployment rollout ends.
     #[serde(default)]
     pub enable_sandbox_updates: Option<bool>,
-    /// Per workspace, the identities allowed to provision and change its
-    /// sandboxes. Workspaces without an entry allow any authorized caller.
+    /// Per workspace, the identities allowed to create and change its
+    /// sandboxes, workload templates, and providers. Workspaces without an
+    /// entry allow any authorized caller.
     #[serde(default)]
-    pub sandbox_managers: Option<BTreeMap<String, Vec<String>>>,
+    pub workspace_managers: Option<BTreeMap<String, Vec<String>>>,
     /// Explicit activation only after every serving gateway supports workspace secrets.
     #[serde(default)]
     pub enable_workspace_secrets: Option<bool>,
@@ -1632,12 +1633,12 @@ fn parse_and_validate(path: &Path, contents: &str) -> Result<ConfigFile, ConfigF
     }
     // A malformed manager entry matches no caller and would block every write,
     // and an empty list would look restrictive while allowing everyone.
-    if let Some(workspaces) = &file.openshell.gateway.sandbox_managers
+    if let Some(workspaces) = &file.openshell.gateway.workspace_managers
         && workspaces.iter().any(|(workspace, managers)| {
             workspace.trim().is_empty()
                 || managers.is_empty()
                 || managers.iter().any(|manager| {
-                    !crate::auth::sandbox_managers::MANAGER_ID_PREFIXES
+                    !crate::auth::workspace_managers::MANAGER_ID_PREFIXES
                         .iter()
                         .any(|prefix| {
                             manager
@@ -1648,7 +1649,7 @@ fn parse_and_validate(path: &Path, contents: &str) -> Result<ConfigFile, ConfigF
         })
     {
         return Err(ConfigFileError::InvalidValue {
-            field: "openshell.gateway.sandbox_managers",
+            field: "openshell.gateway.workspace_managers",
             message: "must map each workspace name to a non-empty list of <provider>:<subject> entries, where provider is oidc, mtls, operator, cloudflare_access, or local_dev",
         });
     }
@@ -3095,16 +3096,16 @@ allow_unauthenticated_users = true
     }
 
     #[test]
-    fn parses_sandbox_managers_per_workspace() {
+    fn parses_workspace_managers_per_workspace() {
         let tmp = write_tmp(
             r#"
-[openshell.gateway.sandbox_managers]
+[openshell.gateway.workspace_managers]
 agents = ["mtls:openshell-k8s-controller", "oidc:ci-bot"]
 sessions = ["mtls:sessions"]
 "#,
         );
-        let file = load(tmp.path()).expect("valid sandbox managers parse");
-        let managers = file.openshell.gateway.sandbox_managers.expect("managers");
+        let file = load(tmp.path()).expect("valid workspace managers parse");
+        let managers = file.openshell.gateway.workspace_managers.expect("managers");
         assert_eq!(
             managers.get("agents").map(Vec::as_slice),
             Some(
@@ -3118,7 +3119,7 @@ sessions = ["mtls:sessions"]
     }
 
     #[test]
-    fn rejects_unqualified_or_empty_sandbox_managers() {
+    fn rejects_unqualified_or_empty_workspace_managers() {
         for value in [
             r#"["openshell-k8s-controller"]"#,
             r#"["mtls:"]"#,
@@ -3126,7 +3127,7 @@ sessions = ["mtls:sessions"]
             "[]",
         ] {
             let tmp = write_tmp(&format!(
-                "[openshell.gateway.sandbox_managers]\nagents = {value}\n"
+                "[openshell.gateway.workspace_managers]\nagents = {value}\n"
             ));
             assert!(load(tmp.path()).is_err(), "{value} must be rejected");
         }

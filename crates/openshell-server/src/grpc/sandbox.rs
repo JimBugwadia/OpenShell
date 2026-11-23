@@ -195,43 +195,59 @@ pub(super) async fn fetch_and_authorize_sandbox(
 /// Missing and unauthorized objects deliberately share one response so names
 /// cannot be used as an existence oracle.
 /// Rejects a change to `sandbox` from anyone but the manager recorded on it,
-/// when its workspace has sandbox managers. `emergency` allows operators and
-/// admins to stop or delete it.
+/// when its workspace has managers. `emergency` allows operators and admins
+/// to stop or delete it.
 pub(super) fn require_recorded_manager(
     state: &ServerState,
     principal: &crate::auth::principal::Principal,
     sandbox: &Sandbox,
     emergency: bool,
 ) -> Result<(), Status> {
-    use crate::auth::sandbox_managers::{
-        NOT_THE_RECORDED_MANAGER, SANDBOX_MANAGER_ANNOTATION, SandboxManagers,
+    require_object_manager(
+        state,
+        principal,
+        sandbox.object_workspace(),
+        sandbox.metadata.as_ref(),
+        emergency,
+    )
+}
+
+/// Rejects a change to an object in `workspace` from anyone but the manager
+/// recorded in its `metadata`, when the workspace has managers.
+pub(super) fn require_object_manager(
+    state: &ServerState,
+    principal: &crate::auth::principal::Principal,
+    workspace: &str,
+    metadata: Option<&ObjectMeta>,
+    emergency: bool,
+) -> Result<(), Status> {
+    use crate::auth::workspace_managers::{
+        MANAGER_ANNOTATION, NOT_THE_RECORDED_MANAGER, WorkspaceManagers,
     };
-    let managers = SandboxManagers::new(
-        state.config.sandbox_managers.clone(),
+    let managers = WorkspaceManagers::new(
+        state.config.workspace_managers.clone(),
         state.admin_role.clone(),
     );
-    let recorded = sandbox
-        .metadata
-        .as_ref()
-        .and_then(|metadata| metadata.annotations.get(SANDBOX_MANAGER_ANNOTATION))
+    let recorded = metadata
+        .and_then(|metadata| metadata.annotations.get(MANAGER_ANNOTATION))
         .map(String::as_str);
-    if managers.permits_sandbox(principal, sandbox.object_workspace(), recorded, emergency) {
+    if managers.permits_object(principal, workspace, recorded, emergency) {
         Ok(())
     } else {
         Err(Status::permission_denied(NOT_THE_RECORDED_MANAGER))
     }
 }
 
-/// Rejects provisioning in `workspace` from anyone but its sandbox managers,
+/// Rejects creating objects in `workspace` from anyone but its managers,
 /// when it has them.
 pub(super) fn require_workspace_manager(
     state: &ServerState,
     principal: &crate::auth::principal::Principal,
     workspace: &str,
 ) -> Result<(), Status> {
-    use crate::auth::sandbox_managers::{NOT_A_MANAGER, SandboxManagers};
-    let managers = SandboxManagers::new(
-        state.config.sandbox_managers.clone(),
+    use crate::auth::workspace_managers::{NOT_A_MANAGER, WorkspaceManagers};
+    let managers = WorkspaceManagers::new(
+        state.config.workspace_managers.clone(),
         state.admin_role.clone(),
     );
     if managers.permits_changes(principal, workspace) {
@@ -239,6 +255,17 @@ pub(super) fn require_workspace_manager(
     } else {
         Err(Status::permission_denied(NOT_A_MANAGER))
     }
+}
+
+/// Canonical managers list for `workspace`, recorded on each new object.
+pub(super) fn managers_in_effect(state: &ServerState, workspace: &str) -> String {
+    crate::auth::workspace_managers::canonical(
+        state
+            .config
+            .workspace_managers
+            .get(workspace)
+            .map_or(&[][..], Vec::as_slice),
+    )
 }
 
 /// [`resolve_and_authorize_sandbox_name`] for a change only the sandbox's
@@ -658,13 +685,7 @@ async fn handle_create_sandbox_inner(
         .await?
         .ensure_active()?;
     require_workspace_manager(state, &principal, &workspace)?;
-    let managers_in_effect = crate::auth::sandbox_managers::canonical(
-        state
-            .config
-            .sandbox_managers
-            .get(&workspace)
-            .map_or(&[][..], Vec::as_slice),
-    );
+    let managers_in_effect = managers_in_effect(state, &workspace);
 
     let (mut spec, created_from_workload_template) = if workload_template_name.is_empty() {
         let spec = request
@@ -881,16 +902,11 @@ async fn handle_create_sandbox_inner(
     if let Some(metadata) = sandbox.metadata.as_mut() {
         runtime_identity.write(&mut metadata.annotations);
         // Record the creator, so only it can change the sandbox in a workspace
-        // with sandbox managers.
-        if let Some(manager) = crate::auth::sandbox_managers::manager_id(&principal) {
-            metadata.annotations.insert(
-                crate::auth::sandbox_managers::SANDBOX_MANAGER_ANNOTATION.to_string(),
-                manager,
-            );
-        }
-        // Lets the gateway refuse to start if the workspace's list later changes.
-        metadata.annotations.insert(
-            crate::auth::sandbox_managers::SANDBOX_MANAGERS_CONFIG_ANNOTATION.to_string(),
+        // with managers, and the list in effect, so the gateway can refuse to
+        // start if the workspace's list later changes.
+        crate::auth::workspace_managers::stamp(
+            &mut metadata.annotations,
+            &principal,
             managers_in_effect,
         );
     }
@@ -1323,6 +1339,13 @@ pub(super) async fn handle_create_sandbox_template(
             "template.metadata.name is required",
         ));
     }
+    require_workspace_manager(state, &principal, &workspace)?;
+    let mut annotations = metadata.annotations;
+    crate::auth::workspace_managers::stamp(
+        &mut annotations,
+        &principal,
+        managers_in_effect(state, &workspace),
+    );
 
     let mut resolved = template;
     resolved.metadata = Some(ObjectMeta {
@@ -1331,7 +1354,7 @@ pub(super) async fn handle_create_sandbox_template(
         created_time: openshell_core::time::timestamp_from_millis(current_time_ms()).ok(),
         labels: metadata.labels,
         resource_version: 0,
-        annotations: metadata.annotations,
+        annotations,
         workspace: workspace.clone(),
         deletion_time: None,
     });
@@ -1495,6 +1518,22 @@ pub(super) async fn handle_delete_sandbox_template(
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &authz.workspace)
         .await?
         .name;
+    // Only the template's recorded manager may delete it. A missing template
+    // falls through to the usual not-found handling.
+    if let Some(template) = state
+        .store
+        .get_message_by_name::<SandboxWorkloadTemplate>(&workspace, &req.name)
+        .await
+        .map_err(|e| Status::internal(format!("fetch sandbox template failed: {e}")))?
+    {
+        require_object_manager(
+            state,
+            &principal,
+            &workspace,
+            template.metadata.as_ref(),
+            false,
+        )?;
+    }
     let deleted = state
         .store
         .delete_by_name(
@@ -2004,7 +2043,7 @@ async fn handle_delete_sandbox_inner(
         .map_err(|error| Status::internal(format!("fetch sandbox failed: {error}")))?
     {
         require_recorded_manager(state, &principal, &sandbox, true)?;
-        if state.config.sandbox_managers.contains_key(&workspace) {
+        if state.config.workspace_managers.contains_key(&workspace) {
             // Delete the sandbox whose manager was checked, never a replacement.
             preconditions.expected_sandbox_id = Some(sandbox.object_id().to_string());
         }
@@ -8088,18 +8127,18 @@ mod tests {
         assert_eq!(
             created.metadata.as_ref().and_then(|metadata| metadata
                 .annotations
-                .get(crate::auth::sandbox_managers::SANDBOX_MANAGER_ANNOTATION)),
+                .get(crate::auth::workspace_managers::MANAGER_ANNOTATION)),
             Some(&"oidc:dev-user".to_string())
         );
     }
 
     #[tokio::test]
-    async fn sandbox_managers_apply_only_to_their_workspace() {
+    async fn workspace_managers_apply_only_to_their_workspace() {
         let mut state = test_server_state().await;
         Arc::get_mut(&mut state)
             .expect("unique state")
             .config
-            .sandbox_managers = std::collections::BTreeMap::from([(
+            .workspace_managers = std::collections::BTreeMap::from([(
             "agents".to_string(),
             vec!["mtls:openshell-k8s-controller".to_string()],
         )]);
@@ -8132,7 +8171,7 @@ mod tests {
         assert_eq!(denied.code(), tonic::Code::PermissionDenied);
         assert_eq!(
             denied.message(),
-            crate::auth::sandbox_managers::NOT_A_MANAGER
+            crate::auth::workspace_managers::NOT_A_MANAGER
         );
 
         // Other workspaces on the same gateway keep the default behavior.
@@ -8145,7 +8184,7 @@ mod tests {
         assert_eq!(
             created.metadata.as_ref().and_then(|metadata| metadata
                 .annotations
-                .get(crate::auth::sandbox_managers::SANDBOX_MANAGERS_CONFIG_ANNOTATION)),
+                .get(crate::auth::workspace_managers::MANAGERS_CONFIG_ANNOTATION)),
             Some(&"[]".to_string())
         );
     }
@@ -8164,7 +8203,7 @@ mod tests {
         let mut state = test_server_state().await;
         {
             let state = Arc::get_mut(&mut state).expect("unique state");
-            state.config.sandbox_managers = std::collections::BTreeMap::from([(
+            state.config.workspace_managers = std::collections::BTreeMap::from([(
                 "default".to_string(),
                 vec!["mtls:cluster-a".into(), "mtls:cluster-b".into()],
             )]);
@@ -8217,7 +8256,7 @@ mod tests {
         let annotations = &created.metadata.as_ref().unwrap().annotations;
         assert_eq!(
             annotations
-                .get(crate::auth::sandbox_managers::SANDBOX_MANAGERS_CONFIG_ANNOTATION)
+                .get(crate::auth::workspace_managers::MANAGERS_CONFIG_ANNOTATION)
                 .map(String::as_str),
             Some(r#"["mtls:cluster-a","mtls:cluster-b"]"#)
         );
@@ -8797,6 +8836,81 @@ mod tests {
             response.sandbox.unwrap().spec.unwrap().providers,
             vec!["work-github".to_string()]
         );
+    }
+
+    fn managed_request<T>(cn: &str, inner: T) -> Request<T> {
+        use crate::auth::identity::{Identity, IdentityProvider};
+        use crate::auth::principal::{Principal, UserPrincipal};
+        let mut request = Request::new(inner);
+        request
+            .extensions_mut()
+            .insert(Principal::User(UserPrincipal {
+                identity: Identity {
+                    subject: cn.to_string(),
+                    display_name: None,
+                    roles: vec!["openshell-admin".to_string()],
+                    scopes: vec![],
+                    provider: IdentityProvider::Mtls,
+                },
+            }));
+        request
+    }
+    #[tokio::test]
+    async fn only_the_recorded_manager_changes_a_workload_template() {
+        let mut state = test_server_state().await;
+        Arc::get_mut(&mut state)
+            .expect("unique state")
+            .config
+            .workspace_managers = std::collections::BTreeMap::from([(
+            "default".to_string(),
+            vec!["mtls:cluster-a".into(), "mtls:cluster-b".into()],
+        )]);
+        let create = || CreateSandboxTemplateRequest {
+            request_id: String::new(),
+            template: Some(test_workload_template("base-r1")),
+            workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+        };
+        let delete = || DeleteSandboxTemplateRequest {
+            name: "base-r1".to_string(),
+            workspace_scope: Some(openshell_core::proto::workspace_selector("default")),
+            allow_missing: false,
+            ..Default::default()
+        };
+
+        let denied = handle_create_sandbox_template(&state, authed_request(create()))
+            .await
+            .expect_err("a non-manager can't create templates in a managed workspace");
+        assert_eq!(denied.code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            denied.message(),
+            crate::auth::workspace_managers::NOT_A_MANAGER
+        );
+
+        let created =
+            handle_create_sandbox_template(&state, managed_request("cluster-a", create()))
+                .await
+                .expect("a manager creates templates")
+                .into_inner()
+                .template
+                .expect("template");
+        let annotations = &created.metadata.as_ref().expect("metadata").annotations;
+        assert_eq!(
+            annotations
+                .get(crate::auth::workspace_managers::MANAGER_ANNOTATION)
+                .map(String::as_str),
+            Some("mtls:cluster-a")
+        );
+
+        let denied = handle_delete_sandbox_template(&state, managed_request("cluster-b", delete()))
+            .await
+            .expect_err("another manager can't delete the template");
+        assert_eq!(
+            denied.message(),
+            crate::auth::workspace_managers::NOT_THE_RECORDED_MANAGER
+        );
+        handle_delete_sandbox_template(&state, managed_request("cluster-a", delete()))
+            .await
+            .expect("the recorded manager deletes its template");
     }
 
     #[tokio::test]

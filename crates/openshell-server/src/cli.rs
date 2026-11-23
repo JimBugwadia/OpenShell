@@ -587,9 +587,9 @@ fn prepare_server_config_with_drivers(
     }
     if let Some(managers) = file
         .as_ref()
-        .and_then(|f| f.openshell.gateway.sandbox_managers.clone())
+        .and_then(|f| f.openshell.gateway.workspace_managers.clone())
     {
-        config.sandbox_managers = managers;
+        config.workspace_managers = managers;
     }
     if let Some(audit) = file
         .as_ref()

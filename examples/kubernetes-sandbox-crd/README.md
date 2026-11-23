@@ -1,7 +1,7 @@
 # Kubernetes Sandbox CRD
 
 This walkthrough shows the experimental `OpenShellSandboxTemplate` and
-`OpenShellSandbox` controller and the gateway's sandbox manager setting. It takes about 15 minutes. Part 1 runs the
+`OpenShellSandbox` controller and the gateway's workspace managers setting. It takes about 15 minutes. Part 1 runs the
 controller against an existing local gateway; Part 2 runs a gateway built from
 this checkout to show which identities can change sandboxes.
 
@@ -10,7 +10,7 @@ cleans up. Add `DEMO_PAUSE=1` to pause between steps when you present.
 
 ```shell
 DEMO_PAUSE=1 tasks/scripts/demo-k8s-controller.sh          # Part 1
-DEMO_PAUSE=1 tasks/scripts/test-sandbox-managers-gateway.sh # Part 2
+DEMO_PAUSE=1 tasks/scripts/test-workspace-managers-gateway.sh # Part 2
 ```
 
 ## Before you start
@@ -281,13 +281,13 @@ Run this part with the script: it generates its own certificates and gateway
 configuration, which are tedious to set up by hand.
 
 ```shell
-DEMO_PAUSE=1 tasks/scripts/test-sandbox-managers-gateway.sh
+DEMO_PAUSE=1 tasks/scripts/test-workspace-managers-gateway.sh
 ```
 
 It starts a gateway from this checkout with:
 
 ```toml
-[openshell.gateway.sandbox_managers]
+[openshell.gateway.workspace_managers]
 default = ["mtls:openshell-k8s-controller", "mtls:agent-executor"]
 ```
 
@@ -298,12 +298,12 @@ conversation with the existing sandbox API), `openshell-cli` (an ordinary user),
 
 | Step | What happens | Point out |
 | :- | :- | :- |
-| 1 | `openshell-cli` tries `sandbox create` | Rejected: "this workspace's sandboxes are managed by another identity" |
-| 2 | `openshell-k8s-controller` creates `managed-1` | The sandbox records `internal.openshell.ai/sandbox-manager: mtls:openshell-k8s-controller` and the list in effect |
+| 1 | `openshell-cli` tries `sandbox create` | Rejected: "this workspace is managed by another identity" |
+| 2 | `openshell-k8s-controller` creates `managed-1` | The sandbox records `internal.openshell.ai/workspace-manager: mtls:openshell-k8s-controller` and the list in effect |
 | 3 | `openshell-cli` lists, then tries `delete` and `stop` | Reading works; changes are rejected |
 | 4 | The gateway restarts with an extra manager in the list | It refuses to start while sandboxes exist, and starts again with the original list |
 | 5 | `oncall` deletes `managed-1` | Operators keep an emergency stop and delete |
-| 6 | Revisions `agent-r1` and `agent-r2` of template family `agent` are published, and `agent-executor` creates `session-1` from `--template agent` | The session resolves to `agent-r2` and records `agent-executor` as its manager; the controller can't delete it |
+| 6 | Revisions `agent-r1` and `agent-r2` of template family `agent` are published, and `agent-executor` creates `session-1` from `--template agent` | The session resolves to `agent-r2` and records `agent-executor` as its manager; the controller can't delete it. `openshell-cli` can't publish a template, and `agent-executor` can't delete the controller's |
 
 The script uses a temporary directory for everything, including the CLI's
 configuration, so it doesn't change your registered gateways.

@@ -2930,6 +2930,35 @@ fn selected_profile_workspace(
     })
 }
 
+/// Rejects a change to provider `name` from anyone but the manager recorded
+/// on it, when `workspace` has managers. A missing provider falls through to
+/// the handler's usual not-found handling.
+async fn require_provider_manager(
+    state: &ServerState,
+    principal: &Principal,
+    workspace: &str,
+    name: &str,
+) -> Result<(), Status> {
+    if !state.config.workspace_managers.contains_key(workspace) {
+        return Ok(());
+    }
+    let provider = state
+        .store
+        .get_message_by_name::<Provider>(workspace, name)
+        .await
+        .map_err(|e| Status::internal(format!("fetch provider failed: {e}")))?;
+    match provider {
+        Some(provider) => super::sandbox::require_object_manager(
+            state,
+            principal,
+            workspace,
+            provider.metadata.as_ref(),
+            false,
+        ),
+        None => Ok(()),
+    }
+}
+
 pub(super) async fn handle_create_provider(
     state: &Arc<ServerState>,
     request: Request<CreateProviderRequest>,
@@ -2955,9 +2984,25 @@ pub(super) async fn handle_create_provider(
         );
         return Err(Status::invalid_argument("provider is required"));
     };
-    if let Some(metadata) = provider.metadata.as_mut() {
-        metadata.workspace.clone_from(&workspace);
-    }
+    super::sandbox::require_workspace_manager(state, &principal, &workspace)?;
+    // Record the creator, so only it can change the provider in a workspace
+    // with managers.
+    let metadata =
+        provider
+            .metadata
+            .get_or_insert_with(|| openshell_core::proto::datamodel::v1::ObjectMeta {
+                created_time: openshell_core::time::timestamp_from_millis(
+                    crate::persistence::current_time_ms(),
+                )
+                .ok(),
+                ..Default::default()
+            });
+    metadata.workspace.clone_from(&workspace);
+    crate::auth::workspace_managers::stamp(
+        &mut metadata.annotations,
+        &principal,
+        super::sandbox::managers_in_effect(state, &workspace),
+    );
     if !provider.credential_handles.is_empty() {
         return Err(Status::invalid_argument(
             "provider.credential_handles is internal gateway state and cannot be supplied",
@@ -4601,6 +4646,7 @@ pub(super) async fn handle_update_provider(
         );
         return Err(Status::invalid_argument("provider is required"));
     };
+    require_provider_manager(state, &principal, &workspace, provider.object_name()).await?;
     let provider_type = provider.r#type.clone();
     provider
         .credential_expiration_times
@@ -5384,6 +5430,7 @@ pub(super) async fn handle_configure_provider_refresh(
     if credential_key.is_empty() {
         return Err(Status::invalid_argument("credential_key is required"));
     }
+    require_provider_manager(state, &principal, &workspace, provider_name).await?;
     let strategy = ProviderCredentialRefreshStrategy::try_from(request.strategy)
         .unwrap_or(ProviderCredentialRefreshStrategy::Unspecified);
     if strategy == ProviderCredentialRefreshStrategy::Unspecified {
@@ -5893,6 +5940,7 @@ pub(super) async fn handle_rotate_provider_credential(
     if credential_key.is_empty() {
         return Err(Status::invalid_argument("credential_key is required"));
     }
+    require_provider_manager(state, &principal, &workspace, provider_name).await?;
     let provider = state
         .store
         .get_message_by_name::<Provider>(&workspace, provider_name)
@@ -5952,6 +6000,7 @@ pub(super) async fn handle_inline_provider_refresh_secrets(
     if credential_key.is_empty() {
         return Err(Status::invalid_argument("credential_key is required"));
     }
+    require_provider_manager(state, &principal, &workspace, provider_name).await?;
     let _mutation_guard = state
         .compute
         .mutation_guard(MutationScope::Workspace(&workspace))
@@ -6169,6 +6218,7 @@ pub(super) async fn handle_delete_provider_refresh(
     if credential_key.is_empty() {
         return Err(Status::invalid_argument("credential_key is required"));
     }
+    require_provider_manager(state, &principal, &workspace, provider_name).await?;
     let provider = state
         .store
         .get_message_by_name::<Provider>(&workspace, provider_name)
@@ -6257,6 +6307,7 @@ pub(super) async fn handle_delete_provider(
     let workspace = super::workspace::resolve_workspace(state.store.as_ref(), &authz.workspace)
         .await?
         .name;
+    require_provider_manager(state, &principal, &workspace, &req.name).await?;
     // A sandbox create or attach in this workspace holds the workspace key
     // shared, so no sandbox can start referencing the provider between the
     // attached-sandbox check and the delete.
@@ -12798,6 +12849,108 @@ pub(super) mod tests {
             err.message()
                 .contains("provider profile 'gitlab' was not found")
         );
+    }
+
+    fn managed_request<T>(cn: &str, inner: T) -> Request<T> {
+        use crate::auth::identity::{Identity, IdentityProvider};
+        use crate::auth::principal::{Principal, UserPrincipal};
+        let mut request = Request::new(inner);
+        request
+            .extensions_mut()
+            .insert(Principal::User(UserPrincipal {
+                identity: Identity {
+                    subject: cn.to_string(),
+                    display_name: None,
+                    roles: vec!["openshell-admin".to_string()],
+                    scopes: vec![],
+                    provider: IdentityProvider::Mtls,
+                },
+            }));
+        request
+    }
+    #[tokio::test]
+    async fn only_the_recorded_manager_changes_a_provider() {
+        let mut state = test_server_state().await;
+        Arc::get_mut(&mut state)
+            .expect("unique state")
+            .config
+            .workspace_managers = std::collections::BTreeMap::from([(
+            "default".to_string(),
+            vec!["mtls:cluster-a".into(), "mtls:cluster-b".into()],
+        )]);
+        let provider = || Provider {
+            metadata: Some(openshell_core::proto::datamodel::v1::ObjectMeta {
+                name: "pypi".to_string(),
+                ..Default::default()
+            }),
+            r#type: "pypi".to_string(),
+            profile_workspace: "default".to_string(),
+            ..Default::default()
+        };
+        let create = || CreateProviderRequest {
+            request_id: String::new(),
+            provider: Some(provider()),
+            workspace_scope: Some(default_workspace_selector()),
+        };
+        let update = || UpdateProviderRequest {
+            provider: Some(provider()),
+            workspace_scope: Some(default_workspace_selector()),
+            ..Default::default()
+        };
+        let delete = || DeleteProviderRequest {
+            request_id: String::new(),
+            allow_missing: false,
+            name: "pypi".to_string(),
+            workspace_scope: Some(default_workspace_selector()),
+        };
+
+        let denied = handle_create_provider(&state, authed_request(create()))
+            .await
+            .expect_err("a non-manager can't create providers in a managed workspace");
+        assert_eq!(denied.code(), Code::PermissionDenied);
+        assert_eq!(
+            denied.message(),
+            crate::auth::workspace_managers::NOT_A_MANAGER
+        );
+
+        let created = handle_create_provider(&state, managed_request("cluster-a", create()))
+            .await
+            .expect("a manager creates providers")
+            .into_inner()
+            .provider
+            .expect("provider");
+        assert_eq!(
+            created
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata
+                    .annotations
+                    .get(crate::auth::workspace_managers::MANAGER_ANNOTATION))
+                .map(String::as_str),
+            Some("mtls:cluster-a")
+        );
+
+        for denied in [
+            handle_update_provider(&state, managed_request("cluster-b", update()))
+                .await
+                .map(|_| ())
+                .expect_err("another manager can't update the provider"),
+            handle_delete_provider(&state, authed_request(delete()))
+                .await
+                .map(|_| ())
+                .expect_err("a non-manager can't delete the provider"),
+        ] {
+            assert_eq!(
+                denied.message(),
+                crate::auth::workspace_managers::NOT_THE_RECORDED_MANAGER
+            );
+        }
+        handle_update_provider(&state, managed_request("cluster-a", update()))
+            .await
+            .expect("the recorded manager updates its provider");
+        handle_delete_provider(&state, managed_request("cluster-a", delete()))
+            .await
+            .expect("the recorded manager deletes its provider");
     }
 
     #[tokio::test]

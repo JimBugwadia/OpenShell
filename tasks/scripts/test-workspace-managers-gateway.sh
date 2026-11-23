@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Live test of the gateway's experimental per-workspace sandbox_managers setting,
+# Live test of the gateway's experimental per-workspace workspace_managers setting,
 # applied here to the default workspace.
 #
 # Runs a gateway built from this checkout on its own port, with mTLS user
 # authentication and three client identities:
-#   openshell-k8s-controller  the listed sandbox manager
+#   openshell-k8s-controller  the listed workspace manager
 #   openshell-cli             an ordinary user
 #   agent-executor            a second manager: a service that creates a
 #                             sandbox per conversation with CreateSandbox
@@ -16,7 +16,8 @@
 # that the operator can delete in an emergency, that the gateway refuses to
 # start when the list changes while sandboxes exist, and that sessions
 # created from a template family resolve to its latest revision and can't be
-# changed by the other manager. Everything, including the CLI's configuration, lives
+# changed by the other manager, and that only the manager that published a
+# workload template can delete it. Everything, including the CLI's configuration, lives
 # in one temporary directory.
 #
 # Environment:
@@ -80,7 +81,7 @@ cleanup() {
     tail -40 "${GATEWAY_LOG}" >&2
   fi
   rm -rf "${STATE}"
-  [ "${result}" -eq 0 ] && printf '\n%sPASS: sandbox manager checks behaved as configured.%s\n' "${green}" "${reset}"
+  [ "${result}" -eq 0 ] && printf '\n%sPASS: workspace manager checks behaved as configured.%s\n' "${green}" "${reset}"
   exit "${result}"
 }
 trap cleanup EXIT
@@ -124,7 +125,7 @@ name = "${GW_NAME}"
 compute_driver = "docker"
 guest_tls_ca = "${STATE}/pki/ca.crt"
 
-[openshell.gateway.sandbox_managers]
+[openshell.gateway.workspace_managers]
 default = ${managers}
 
 [openshell.gateway.gateway_jwt]
@@ -179,7 +180,7 @@ MANAGERS='["mtls:openshell-k8s-controller", "mtls:agent-executor"]'
 write_config "${MANAGERS}"
 sed -n '/^\[openshell.gateway\]/,/^$/p' "${STATE}/gateway.toml"
 start_gateway || fail "gateway exited during startup"
-pass "gateway listening on 127.0.0.1:${PORT}; sandbox managers: the controller and agent-executor"
+pass "gateway listening on 127.0.0.1:${PORT}; workspace managers: the controller and agent-executor"
 
 step "1. A user who isn't a manager can't create a sandbox"
 if output="$(as cli sandbox create --name cli-made --no-tty -- true 2>&1)"; then
@@ -198,8 +199,8 @@ for _ in $(seq 1 30); do
 done
 as controller sandbox get managed-1 >"${STATE}/get.txt" 2>&1 || fail "the manager's create did not persist"
 kill "${create_pid}" 2>/dev/null; wait "${create_pid}" 2>/dev/null || true; create_pid=
-grep -E "sandbox-manager|sandbox-managers" "${STATE}/get.txt" | sed 's/^ */  /'
-grep -q "internal.openshell.ai/sandbox-manager: mtls:openshell-k8s-controller" "${STATE}/get.txt" \
+grep -E "workspace-manager|workspace-managers" "${STATE}/get.txt" | sed 's/^ */  /'
+grep -q "internal.openshell.ai/workspace-manager: mtls:openshell-k8s-controller" "${STATE}/get.txt" \
   || fail "the sandbox does not record its manager"
 pass "managed-1 created and records mtls:openshell-k8s-controller as its manager"
 
@@ -245,6 +246,16 @@ for generation in 1 2; do
     || fail "could not publish template revision agent-r${generation}"
 done
 pass "published revisions agent-r1 and agent-r2 of template family agent"
+if output="$(as cli sandbox template create cli-template 2>&1)"; then
+  fail "a non-manager published a template"
+fi
+denied "${output}" || fail "unexpected template create error: ${output}"
+pass "template create rejected for mtls:openshell-cli"
+if output="$(as executor sandbox template delete agent-r1 2>&1)"; then
+  fail "agent-executor deleted the controller's template"
+fi
+denied "${output}" || fail "unexpected template delete error: ${output}"
+pass "agent-executor can't delete the controller's template"
 as executor sandbox create --name session-1 --template agent --no-tty -- sleep 600 \
   >"${STATE}/session.log" 2>&1 &
 create_pid=$!
@@ -254,9 +265,9 @@ for _ in $(seq 1 30); do
 done
 as executor sandbox get session-1 >"${STATE}/session.txt" 2>&1 || fail "the session was not created"
 kill "${create_pid}" 2>/dev/null; wait "${create_pid}" 2>/dev/null || true; create_pid=
-grep -E "Workload template|sandbox-manager:" "${STATE}/session.txt" | sed 's/^ */  /'
+grep -E "Workload template|workspace-manager:" "${STATE}/session.txt" | sed 's/^ */  /'
 grep -q "agent-r2" "${STATE}/session.txt" || fail "the session did not resolve to the latest revision"
-grep -q "internal.openshell.ai/sandbox-manager: mtls:agent-executor" "${STATE}/session.txt" \
+grep -q "internal.openshell.ai/workspace-manager: mtls:agent-executor" "${STATE}/session.txt" \
   || fail "the session does not record agent-executor as its manager"
 pass "session-1 resolved family agent to revision agent-r2 and records agent-executor"
 if output="$(as controller sandbox delete session-1 2>&1)"; then
@@ -270,7 +281,8 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 for generation in 1 2; do
-  as controller sandbox template delete "agent-r${generation}" >/dev/null 2>&1 || true
+  as controller sandbox template delete "agent-r${generation}" >/dev/null \
+    || fail "the controller could not delete its template agent-r${generation}"
 done
 pass "agent-executor ended session-1"
 completed=1

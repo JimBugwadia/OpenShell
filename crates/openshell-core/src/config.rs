@@ -394,10 +394,11 @@ pub struct Config {
     /// Disabled by default; not a license to run mixed-version writers.
     pub enable_sandbox_updates: bool,
 
-    /// Per workspace, the provider-qualified identities allowed to provision
-    /// and change its sandboxes, such as `mtls:<certificate CN>` or
-    /// `oidc:<sub>`. A workspace without an entry allows any authorized caller.
-    pub sandbox_managers: BTreeMap<String, Vec<String>>,
+    /// Per workspace, the provider-qualified identities allowed to create and
+    /// change its sandboxes, workload templates, and providers, such as
+    /// `mtls:<certificate CN>` or `oidc:<sub>`. A workspace without an entry
+    /// allows any authorized caller.
+    pub workspace_managers: BTreeMap<String, Vec<String>>,
     /// Workspace secret activation and reveal settings.
     pub workspace_secrets: WorkspaceSecretsConfig,
 
@@ -1238,7 +1239,7 @@ impl Config {
             auth: GatewayAuthConfig::default(),
             enable_websocket_tunnel: false,
             enable_sandbox_updates: false,
-            sandbox_managers: BTreeMap::new(),
+            workspace_managers: BTreeMap::new(),
             workspace_secrets: WorkspaceSecretsConfig::default(),
             gateway_interceptors: Vec::new(),
             provider_profile_sources: vec![GatewayProviderProfileSourceConfig::User],

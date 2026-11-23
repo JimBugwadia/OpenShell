@@ -23,10 +23,10 @@ pub mod oidc;
 pub mod peer;
 pub mod principal;
 pub mod sandbox_jwt;
-pub mod sandbox_managers;
 pub mod sandbox_methods;
 pub mod sandbox_session;
 pub mod supervisor_token;
 pub mod workspace_authz;
+pub mod workspace_managers;
 
 pub use http::router;

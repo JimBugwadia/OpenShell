@@ -1,44 +1,44 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-workspace sandbox managers: the identities allowed to provision and
-//! change a workspace's sandboxes.
+//! Per-workspace managers: the identities allowed to create and change a
+//! workspace's sandboxes, workload templates, and providers.
 //!
 //! A workspace without a list keeps the default behavior, where any
-//! authorized caller may provision. A listed workspace makes its identities
-//! the only writers there, so whether every sandbox has a declared owner is a
-//! property of a workspace, never of the whole gateway. Everyone else keeps
-//! read and debug access, and operators or holders of the configured admin
-//! role keep an emergency stop and delete.
+//! authorized caller may make changes. A listed workspace makes its
+//! identities the only writers there, so whether every object has a declared
+//! owner is a property of a workspace, never of the whole gateway. Everyone
+//! else keeps read and debug access, and operators or holders of the
+//! configured admin role keep an emergency sandbox stop and delete.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use openshell_core::proto::Sandbox;
+use openshell_core::proto::{Provider, Sandbox, SandboxWorkloadTemplate};
 use prost::Message;
 
 use crate::auth::identity::{Identity, IdentityProvider};
 use crate::auth::principal::Principal;
-use crate::persistence::{ObjectCursor, ObjectType, Store};
+use crate::persistence::{ObjectCursor, ObjectType, Store, migrate_legacy_time_fields};
 
-/// Annotation that records which identity created a sandbox.
-pub const SANDBOX_MANAGER_ANNOTATION: &str = "internal.openshell.ai/sandbox-manager";
+/// Annotation that records which identity created an object.
+pub const MANAGER_ANNOTATION: &str = "internal.openshell.ai/workspace-manager";
 
-/// Annotation that records the workspace's managers list in effect when a
-/// sandbox was created, so the gateway can tell when the list changed under it.
-pub const SANDBOX_MANAGERS_CONFIG_ANNOTATION: &str = "internal.openshell.ai/sandbox-managers";
+/// Annotation that records the workspace's managers list in effect when an
+/// object was created, so the gateway can tell when the list changed under it.
+pub const MANAGERS_CONFIG_ANNOTATION: &str = "internal.openshell.ai/workspace-managers";
 
-/// Error message for callers that aren't a workspace's sandbox managers.
+/// Error message for callers that aren't a workspace's managers.
 pub const NOT_A_MANAGER: &str =
-    "this workspace's sandboxes are managed by another identity; use it to make this change";
+    "this workspace is managed by another identity; use it to make this change";
 
-/// Error message for a manager changing another manager's sandbox.
+/// Error message for a manager changing another manager's object.
 pub const NOT_THE_RECORDED_MANAGER: &str =
-    "this sandbox is managed by another identity; use it to make this change";
+    "this object is managed by another identity; use it to make this change";
 
 const SCAN_PAGE_SIZE: u32 = 1000;
 
 /// Canonical, order-independent form of a managers list, recorded on each
-/// sandbox. An unlisted workspace, the default, is `[]`.
+/// object. An unlisted workspace, the default, is `[]`.
 #[must_use]
 pub fn canonical(managers: &[String]) -> String {
     let mut sorted = managers.to_vec();
@@ -47,9 +47,36 @@ pub fn canonical(managers: &[String]) -> String {
     serde_json::to_string(&sorted).unwrap_or_default()
 }
 
-/// Refuse to start when any existing sandbox was created under a different
-/// managers list for its workspace. Sandboxes created before the list was
-/// recorded count as created under the default, empty list.
+/// Records the creator and the managers list in effect on a new object,
+/// replacing any values a caller supplied.
+pub fn stamp(
+    annotations: &mut HashMap<String, String>,
+    principal: &Principal,
+    managers_in_effect: String,
+) {
+    annotations.remove(MANAGER_ANNOTATION);
+    if let Some(manager) = manager_id(principal) {
+        annotations.insert(MANAGER_ANNOTATION.to_string(), manager);
+    }
+    annotations.insert(MANAGERS_CONFIG_ANNOTATION.to_string(), managers_in_effect);
+}
+
+type RecordedList = fn(&[u8]) -> Result<Option<String>, prost::DecodeError>;
+
+fn recorded_list<T: Message + Default>(
+    payload: &[u8],
+    metadata: impl Fn(&T) -> Option<&openshell_core::proto::datamodel::v1::ObjectMeta>,
+) -> Result<Option<String>, prost::DecodeError> {
+    let message = T::decode(payload)?;
+    Ok(metadata(&message)
+        .and_then(|metadata| metadata.annotations.get(MANAGERS_CONFIG_ANNOTATION))
+        .cloned())
+}
+
+/// Refuse to start when any existing sandbox, workload template, or provider
+/// was created under a different managers list for its workspace. Objects
+/// created before the list was recorded count as created under the default,
+/// empty list.
 ///
 /// # Errors
 ///
@@ -59,26 +86,51 @@ pub async fn verify_unchanged(
     store: &Store,
     managers: &BTreeMap<String, Vec<String>>,
 ) -> Result<(), String> {
+    let kinds: [(&str, &str, RecordedList); 3] = [
+        (Sandbox::object_type(), "sandbox", |payload| {
+            recorded_list::<Sandbox>(payload, |m| m.metadata.as_ref())
+        }),
+        (
+            SandboxWorkloadTemplate::object_type(),
+            "workload template",
+            |payload| recorded_list::<SandboxWorkloadTemplate>(payload, |m| m.metadata.as_ref()),
+        ),
+        (Provider::object_type(), "provider", |payload| {
+            recorded_list::<Provider>(payload, |m| m.metadata.as_ref())
+        }),
+    ];
+    for (object_type, kind, recorded) in kinds {
+        verify_kind(store, managers, object_type, kind, recorded).await?;
+    }
+    Ok(())
+}
+
+async fn verify_kind(
+    store: &Store,
+    managers: &BTreeMap<String, Vec<String>>,
+    object_type: &str,
+    kind: &str,
+    recorded_list: RecordedList,
+) -> Result<(), String> {
     let mut cursor = None;
     loop {
         let records = store
-            .list_by_type_after(Sandbox::object_type(), cursor.as_ref(), SCAN_PAGE_SIZE)
+            .list_by_type_after(object_type, cursor.as_ref(), SCAN_PAGE_SIZE)
             .await
-            .map_err(|error| format!("could not check sandbox managers: {error}"))?;
+            .map_err(|error| format!("could not check workspace managers: {error}"))?;
         cursor = records.last().map(ObjectCursor::from);
         for record in &records {
             // Fail closed: an unreadable record could hide a different list.
-            let sandbox = Sandbox::decode(record.payload.as_slice()).map_err(|error| {
-                format!(
-                    "could not check sandbox managers: sandbox {}/{} is unreadable: {error}",
-                    record.workspace, record.name
-                )
-            })?;
-            let recorded = sandbox
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.annotations.get(SANDBOX_MANAGERS_CONFIG_ANNOTATION))
-                .map_or("[]", String::as_str);
+            let recorded = migrate_legacy_time_fields(object_type, &record.payload)
+                .map_err(|error| error.to_string())
+                .and_then(|payload| recorded_list(&payload).map_err(|error| error.to_string()))
+                .map_err(|error| {
+                    format!(
+                        "could not check workspace managers: {kind} {}/{} is unreadable: {error}",
+                        record.workspace, record.name
+                    )
+                })?;
+            let recorded = recorded.as_deref().unwrap_or("[]");
             let current = canonical(
                 managers
                     .get(&record.workspace)
@@ -86,10 +138,10 @@ pub async fn verify_unchanged(
             );
             if recorded != current {
                 return Err(format!(
-                    "openshell.gateway.sandbox_managers for workspace {} changed from \
-                     {recorded} to {current} while it has sandboxes (for example {}/{}); \
-                     restore the previous list, or delete the workspace's sandboxes before \
-                     changing it",
+                    "openshell.gateway.workspace_managers for workspace {} changed from \
+                     {recorded} to {current} while it has a {kind} (for example {}/{}); \
+                     restore the previous list, or delete the workspace's sandboxes, \
+                     workload templates, and providers before changing it",
                     record.workspace, record.workspace, record.name
                 ));
             }
@@ -123,7 +175,7 @@ fn qualified(identity: &Identity) -> String {
     format!("{provider}:{}", identity.subject)
 }
 
-/// Prefixes accepted in the `sandbox_managers` setting.
+/// Prefixes accepted in the `workspace_managers` setting.
 pub const MANAGER_ID_PREFIXES: &[&str] = &[
     "oidc:",
     "mtls:",
@@ -132,14 +184,14 @@ pub const MANAGER_ID_PREFIXES: &[&str] = &[
     "local_dev:",
 ];
 
-/// The configured sandbox managers, by workspace name.
+/// The configured workspace managers, by workspace name.
 #[derive(Debug, Clone, Default)]
-pub struct SandboxManagers {
+pub struct WorkspaceManagers {
     managers: BTreeMap<String, Vec<String>>,
     admin_role: String,
 }
 
-impl SandboxManagers {
+impl WorkspaceManagers {
     /// `admin_role` is the configured OIDC admin role; empty means no user has
     /// emergency access, so an unset role never grants it to everyone.
     #[must_use]
@@ -156,7 +208,7 @@ impl SandboxManagers {
         self.managers.get(workspace).map_or(&[], Vec::as_slice)
     }
 
-    /// Whether `workspace` restricts provisioning to listed identities.
+    /// Whether `workspace` restricts changes to listed identities.
     #[must_use]
     pub fn is_enforced(&self, workspace: &str) -> bool {
         !self.for_workspace(workspace).is_empty()
@@ -168,8 +220,8 @@ impl SandboxManagers {
         manager_id(principal).is_some_and(|id| self.for_workspace(workspace).contains(&id))
     }
 
-    /// Whether `principal` may provision sandboxes in `workspace`. Sandbox,
-    /// peer, and supervisor principals have their own method limits.
+    /// Whether `principal` may create objects in `workspace`. Sandbox, peer,
+    /// and supervisor principals have their own method limits.
     #[must_use]
     pub fn permits_changes(&self, principal: &Principal, workspace: &str) -> bool {
         !self.is_enforced(workspace)
@@ -177,13 +229,13 @@ impl SandboxManagers {
             || self.is_manager(principal, workspace)
     }
 
-    /// Whether `principal` may change one sandbox in `workspace`, given the
-    /// manager recorded on it. Only that manager may, apart from emergency
-    /// stop and delete. A sandbox with no recorded manager can't exist in an
-    /// enforced workspace, because the gateway refuses to start after a
+    /// Whether `principal` may change one object in `workspace`, given the
+    /// manager recorded on it. Only that manager may, apart from an emergency
+    /// sandbox stop and delete. An object with no recorded manager can't exist
+    /// in an enforced workspace, because the gateway refuses to start after a
     /// workspace's list changes.
     #[must_use]
-    pub fn permits_sandbox(
+    pub fn permits_object(
         &self,
         principal: &Principal,
         workspace: &str,
@@ -255,8 +307,8 @@ mod tests {
             .collect()
     }
 
-    fn managed() -> SandboxManagers {
-        SandboxManagers::new(
+    fn managed() -> WorkspaceManagers {
+        WorkspaceManagers::new(
             lists(&[("agents", &["mtls:k8s-controller"])]),
             "openshell-admin",
         )
@@ -267,7 +319,7 @@ mod tests {
         let managers = managed();
         assert!(!managers.is_enforced("default"));
         assert!(managers.permits_changes(&mtls_user("cli", &[]), "default"));
-        assert!(managers.permits_sandbox(&user("alice"), "default", Some("oidc:bob"), false));
+        assert!(managers.permits_object(&user("alice"), "default", Some("oidc:bob"), false));
     }
 
     #[test]
@@ -277,7 +329,7 @@ mod tests {
         assert!(managers.permits_changes(&mtls_user("k8s-controller", &[]), "agents"));
         assert!(!managers.permits_changes(&mtls_user("cli", &[]), "agents"));
         // A workspace's manager has no special standing in another workspace.
-        let other = SandboxManagers::new(
+        let other = WorkspaceManagers::new(
             lists(&[
                 ("agents", &["mtls:k8s-controller"]),
                 ("sessions", &["mtls:sessions"]),
@@ -300,21 +352,21 @@ mod tests {
     #[test]
     fn sandbox_principals_are_unaffected() {
         assert!(managed().permits_changes(&sandbox("sandbox-1"), "agents"));
-        assert!(managed().permits_sandbox(&sandbox("sandbox-1"), "agents", None, false));
+        assert!(managed().permits_object(&sandbox("sandbox-1"), "agents", None, false));
     }
 
     #[test]
     fn only_the_recorded_manager_changes_a_sandbox() {
-        let managers = SandboxManagers::new(
+        let managers = WorkspaceManagers::new(
             lists(&[("agents", &["mtls:cluster-a", "mtls:cluster-b"])]),
             "openshell-admin",
         );
         let a = mtls_user("cluster-a", &[]);
         let b = mtls_user("cluster-b", &[]);
-        assert!(managers.permits_sandbox(&a, "agents", Some("mtls:cluster-a"), false));
-        assert!(!managers.permits_sandbox(&b, "agents", Some("mtls:cluster-a"), false));
-        assert!(!managers.permits_sandbox(&b, "agents", Some("mtls:cluster-a"), true));
-        assert!(!managers.permits_sandbox(&a, "agents", None, false));
+        assert!(managers.permits_object(&a, "agents", Some("mtls:cluster-a"), false));
+        assert!(!managers.permits_object(&b, "agents", Some("mtls:cluster-a"), false));
+        assert!(!managers.permits_object(&b, "agents", Some("mtls:cluster-a"), true));
+        assert!(!managers.permits_object(&a, "agents", None, false));
     }
 
     #[test]
@@ -322,18 +374,18 @@ mod tests {
         let managers = managed();
         let admin = mtls_user("oncall", &["openshell-admin"]);
         let recorded = Some("mtls:k8s-controller");
-        assert!(managers.permits_sandbox(&admin, "agents", recorded, true));
-        assert!(!managers.permits_sandbox(&admin, "agents", recorded, false));
+        assert!(managers.permits_object(&admin, "agents", recorded, true));
+        assert!(!managers.permits_object(&admin, "agents", recorded, false));
         assert!(!managers.permits_changes(&admin, "agents"));
-        assert!(managers.permits_sandbox(&operator("oncall"), "agents", recorded, true));
+        assert!(managers.permits_object(&operator("oncall"), "agents", recorded, true));
         assert!(!managers.permits_changes(&operator("oncall"), "agents"));
     }
 
     #[test]
     fn unset_admin_role_grants_no_emergency_access() {
-        let managers = SandboxManagers::new(lists(&[("agents", &["mtls:k8s-controller"])]), "");
+        let managers = WorkspaceManagers::new(lists(&[("agents", &["mtls:k8s-controller"])]), "");
         let admin = mtls_user("cli", &["openshell-admin"]);
-        assert!(!managers.permits_sandbox(&admin, "agents", Some("mtls:k8s-controller"), true));
+        assert!(!managers.permits_object(&admin, "agents", Some("mtls:k8s-controller"), true));
     }
 
     #[test]
@@ -357,7 +409,7 @@ mod tests {
                 name: "agent".into(),
                 workspace: "agents".into(),
                 annotations: [(
-                    SANDBOX_MANAGERS_CONFIG_ANNOTATION.to_string(),
+                    MANAGERS_CONFIG_ANNOTATION.to_string(),
                     canonical(&["mtls:k8s".into()]),
                 )]
                 .into(),
@@ -379,5 +431,68 @@ mod tests {
             let error = verify_unchanged(&store, &changed).await.unwrap_err();
             assert!(error.contains("agents/agent"), "{error}");
         }
+    }
+
+    fn meta(name: &str, workspace: &str) -> openshell_core::proto::datamodel::v1::ObjectMeta {
+        openshell_core::proto::datamodel::v1::ObjectMeta {
+            id: format!("{workspace}-{name}"),
+            name: name.into(),
+            workspace: workspace.into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_also_checks_templates_and_providers() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let template = SandboxWorkloadTemplate {
+            metadata: Some(meta("base-r1", "agents")),
+            ..Default::default()
+        };
+        store.put_message(&template).await.unwrap();
+        // A template created before the list counts as created under `[]`.
+        verify_unchanged(&store, &lists(&[])).await.unwrap();
+        let error = verify_unchanged(&store, &lists(&[("agents", &["mtls:k8s"])]))
+            .await
+            .unwrap_err();
+        assert!(error.contains("workload template"), "{error}");
+        assert!(error.contains("agents/base-r1"), "{error}");
+
+        let mut provider = Provider {
+            metadata: Some(meta("github", "sessions")),
+            ..Default::default()
+        };
+        if let Some(metadata) = provider.metadata.as_mut() {
+            metadata.annotations.insert(
+                MANAGERS_CONFIG_ANNOTATION.to_string(),
+                canonical(&["mtls:s".into()]),
+            );
+        }
+        store.put_message(&provider).await.unwrap();
+        verify_unchanged(&store, &lists(&[("sessions", &["mtls:s"])]))
+            .await
+            .unwrap();
+        let error = verify_unchanged(&store, &lists(&[])).await.unwrap_err();
+        assert!(error.contains("provider"), "{error}");
+        assert!(error.contains("sessions/github"), "{error}");
+    }
+
+    #[test]
+    fn stamp_replaces_caller_supplied_values() {
+        let mut annotations = HashMap::from([
+            (MANAGER_ANNOTATION.to_string(), "mtls:forged".to_string()),
+            ("team".to_string(), "a".to_string()),
+        ]);
+        stamp(
+            &mut annotations,
+            &mtls_user("k8s", &[]),
+            "[\"mtls:k8s\"]".into(),
+        );
+        assert_eq!(annotations[MANAGER_ANNOTATION], "mtls:k8s");
+        assert_eq!(annotations[MANAGERS_CONFIG_ANNOTATION], r#"["mtls:k8s"]"#);
+        assert_eq!(annotations["team"], "a");
+        // A principal with no manager identity records none.
+        stamp(&mut annotations, &sandbox("sandbox-1"), "[]".into());
+        assert!(!annotations.contains_key(MANAGER_ANNOTATION));
     }
 }
