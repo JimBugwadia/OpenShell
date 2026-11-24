@@ -13,8 +13,12 @@ The chart installs:
 
 - The three OpenShell CRDs, generated from the controller binary. They're kept
   when you uninstall the release.
-- A ServiceAccount, a Role and RoleBinding in the watched namespace, and a Role
-  for the leader Lease in the release namespace.
+- A ServiceAccount; a ClusterRole and ClusterRoleBinding for the OpenShell
+  resources; a Role and RoleBinding for Secrets in the watched namespace; and a
+  Role for the leader Lease in the release namespace. The OpenShell resources
+  are granted cluster-wide so that deleting the watched namespace can't remove
+  the controller's access before its finalizers finish. The controller still
+  watches only its own namespace.
 - The `openshell-sandbox-platform` and `openshell-sandbox-developer`
   ClusterRoles for people. Bind them per namespace with a RoleBinding.
 - A Deployment with one replica that reconciles while it holds a leader
@@ -37,11 +41,15 @@ The chart installs:
 2. Create the gateway workspace, and make the controller's identity a
    workspace admin.
 
-3. Store the gateway CA and the controller's certificate and key in a Secret
-   in the release namespace:
+3. Install the release in its own namespace, not in the namespace it watches.
+   If it ran in the watched namespace, deleting that namespace would delete the
+   controller before it could clean up the gateway sandboxes. Store the gateway
+   CA and the controller's certificate and key in a Secret in the release
+   namespace:
 
    ```shell
-   kubectl create secret generic openshell-controller-tls -n agents \
+   kubectl create namespace openshell-system
+   kubectl create secret generic openshell-controller-tls -n openshell-system \
      --from-file=ca.crt --from-file=tls.crt --from-file=tls.key
    ```
 
@@ -49,7 +57,8 @@ The chart installs:
 
 ```shell
 helm install openshell-controller deploy/helm/openshell-k8s-controller \
-  --namespace agents \
+  --namespace openshell-system \
+  --set watchNamespace=agents \
   --set gateway.url=https://openshell.openshell.svc:8080 \
   --set gateway.workspace=agents \
   --set gateway.tls.secretName=openshell-controller-tls

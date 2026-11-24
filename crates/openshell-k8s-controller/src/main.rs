@@ -1156,11 +1156,38 @@ async fn reconcile_provider(
     Ok(Action::requeue(Duration::from_secs(seconds)))
 }
 
-fn report(failed: bool) -> futures::future::Ready<()> {
-    if failed {
-        eprintln!("controller observation failed");
+/// Log a failed watch. `error_policy` already logs reconcile failures, and
+/// server messages can echo object contents, so only the status code is shown.
+fn report<T, E>(
+    watching: &'static str,
+    result: Result<T, controller::Error<E, watcher::Error>>,
+) -> futures::future::Ready<()> {
+    match result {
+        Err(controller::Error::QueueError(error)) => {
+            eprintln!("watching {watching} failed: {}", watch_failure(&error));
+        }
+        Err(controller::Error::RunnerError(_)) => eprintln!("controller observation failed"),
+        _ => {}
     }
     futures::future::ready(())
+}
+
+fn watch_failure(error: &watcher::Error) -> String {
+    let code = match error {
+        watcher::Error::InitialListFailed(error)
+        | watcher::Error::WatchStartFailed(error)
+        | watcher::Error::WatchFailed(error) => match error {
+            kube::Error::Api(status) => Some(status.code),
+            _ => None,
+        },
+        watcher::Error::WatchError(status) => Some(status.code),
+        watcher::Error::NoResourceVersion => None,
+    };
+    match code {
+        Some(403) => "HTTP 403: check the controller's RBAC".to_string(),
+        Some(code) => format!("HTTP {code}"),
+        None => "connection error".to_string(),
+    }
 }
 
 fn unix_now() -> Result<i64, Error> {
@@ -1261,12 +1288,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_config(config.clone())
         .shutdown_on_signal()
         .run(reconcile, error_policy, Arc::clone(&context))
-        .for_each(|result| report(result.is_err()));
+        .for_each(|result| report("sandboxes", result));
     let templates = Controller::new(templates, watcher::Config::default())
         .with_config(config.clone())
         .shutdown_on_signal()
         .run(reconcile_template, error_policy, Arc::clone(&context))
-        .for_each(|result| report(result.is_err()));
+        .for_each(|result| report("templates", result));
     // A Secret change reconciles every provider that references the Secret.
     let provider_controller = Controller::new(providers, watcher::Config::default());
     let declared = provider_controller.store();
@@ -1287,7 +1314,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_config(config)
         .shutdown_on_signal()
         .run(reconcile_provider, error_policy, context)
-        .for_each(|result| report(result.is_err()));
+        .for_each(|result| report("providers or their Secrets", result));
     let controllers = async {
         futures::join!(sandboxes, templates, providers);
     };
