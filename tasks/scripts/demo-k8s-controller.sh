@@ -53,6 +53,7 @@ KCFG="${ROOT}/target/${CLUSTER}.kubeconfig"
 WATCH_LOG="${ROOT}/target/${CLUSTER}-watch.log"
 RELEASE=openshell-controller
 DEPLOYMENT="${RELEASE}-openshell-k8s-controller"
+CONTROLLER_NAMESPACE=openshell-system
 CONTROLLER_IMAGE_TAG=demo
 
 bold=$'\033[1m'; green=$'\033[32m'; red=$'\033[31m'; dim=$'\033[2m'; reset=$'\033[0m'
@@ -101,7 +102,7 @@ cleanup() {
   printf '\n%s==> Cleaning up%s\n' "${bold}" "${reset}"
   if [ "${result}" -ne 0 ] && [ "${created_cluster}" = "1" ]; then
     echo "--- controller log ---" >&2
-    kctl logs -n "${NAMESPACE}" "deployment/${DEPLOYMENT}" --tail=40 >&2 2>/dev/null || true
+    kctl logs -n "${CONTROLLER_NAMESPACE}" "deployment/${DEPLOYMENT}" --tail=40 >&2 2>/dev/null || true
   fi
   # The controller keeps running until the cluster is deleted, so the
   # finalizers can remove the gateway objects.
@@ -174,10 +175,13 @@ run kind load docker-image "openshell/k8s-controller:${CONTROLLER_IMAGE_TAG}" --
 
 step "Install the controller with its Helm chart"
 # The controller authenticates to the gateway with this client certificate.
-kctl create secret generic gateway-tls -n "${NAMESPACE}" --from-file=ca.crt="${MTLS_DIR}/ca.crt" \
+# It runs in its own namespace, so deleting the watched namespace can't delete
+# the controller before its finalizers finish.
+kctl create namespace "${CONTROLLER_NAMESPACE}" >/dev/null
+kctl create secret generic gateway-tls -n "${CONTROLLER_NAMESPACE}" --from-file=ca.crt="${MTLS_DIR}/ca.crt" \
   --from-file=tls.crt="${MTLS_DIR}/tls.crt" --from-file=tls.key="${MTLS_DIR}/tls.key" >/dev/null
 run helm --kubeconfig "${KCFG}" install "${RELEASE}" "${ROOT}/deploy/helm/openshell-k8s-controller" \
-  --namespace "${NAMESPACE}" --wait --timeout 120s \
+  --namespace "${CONTROLLER_NAMESPACE}" --wait --timeout 120s --set watchNamespace="${NAMESPACE}" \
   --set image.repository=openshell/k8s-controller --set image.tag="${CONTROLLER_IMAGE_TAG}" \
   --set image.pullPolicy=Never \
   --set gateway.url="${GATEWAY_URL}" --set gateway.workspace="${WORKSPACE}" \
@@ -186,10 +190,10 @@ run kctl wait --for=condition=Established --timeout=60s \
   crd/openshellsandboxes.openshell.ai crd/openshellsandboxtemplates.openshell.ai \
   crd/openshellproviders.openshell.ai
 for _ in $(seq 30); do
-  kctl logs -n "${NAMESPACE}" "deployment/${DEPLOYMENT}" 2>/dev/null | grep -q "acquired Lease" && break
+  kctl logs -n "${CONTROLLER_NAMESPACE}" "deployment/${DEPLOYMENT}" 2>/dev/null | grep -q "acquired Lease" && break
   sleep 1
 done
-kctl logs -n "${NAMESPACE}" "deployment/${DEPLOYMENT}" | grep -q "acquired Lease" \
+kctl logs -n "${CONTROLLER_NAMESPACE}" "deployment/${DEPLOYMENT}" | grep -q "acquired Lease" \
   || fail "the controller didn't start reconciling"
 pass "controller deployed with Helm, bound to ${NAMESPACE} -> ${WORKSPACE}"
 
@@ -353,10 +357,10 @@ pass "template published ${TEMPLATE}-r2; support-agent still runs ${TEMPLATE}-r1
 
 step "5. Restart the controller; it resumes from the status journal without duplicating work"
 attempts_before="$(jp support-agent '{.status.journal.createAttempts}')"
-run kctl rollout restart "deployment/${DEPLOYMENT}" -n "${NAMESPACE}"
-run kctl rollout status "deployment/${DEPLOYMENT}" -n "${NAMESPACE}" --timeout=120s
+run kctl rollout restart "deployment/${DEPLOYMENT}" -n "${CONTROLLER_NAMESPACE}"
+run kctl rollout status "deployment/${DEPLOYMENT}" -n "${CONTROLLER_NAMESPACE}" --timeout=120s
 for _ in $(seq 30); do
-  kctl logs -n "${NAMESPACE}" "deployment/${DEPLOYMENT}" 2>/dev/null | grep -q "acquired Lease" && break
+  kctl logs -n "${CONTROLLER_NAMESPACE}" "deployment/${DEPLOYMENT}" 2>/dev/null | grep -q "acquired Lease" && break
   sleep 1
 done
 # Give the new controller time to reconcile the existing resources.

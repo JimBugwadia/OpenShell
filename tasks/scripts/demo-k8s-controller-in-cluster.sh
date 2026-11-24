@@ -128,10 +128,15 @@ for _ in $(seq 1 30); do
   lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1 && break
   sleep 1
 done
-run "${CLI}" gateway add "https://127.0.0.1:${PORT}" --local --name "${GW}" >/dev/null
-os status | grep -q "Status: Connected" || fail "the CLI can't connect to the gateway"
+# With --local, the CLI imports the client certificate of a gateway installed
+# on this machine, such as one from Homebrew, over the files copied above.
+# Point that import at an empty location so the chart's certificate stays.
+run env OPENSHELL_LOCAL_TLS_DIR="${STATE}/no-local-tls" \
+  "${CLI}" gateway add "https://127.0.0.1:${PORT}" --local --name "${GW}" >/dev/null
+status="$(os status 2>&1 || true)"
+grep -q "Status: Connected" <<<"${status}" || { echo "${status}" >&2; fail "the CLI can't connect to the gateway"; }
 run os workspace create --name "${NAMESPACE}"
-pass "gateway $(os status | awk '/Version:/ {print $2}') is Connected through 127.0.0.1:${PORT}"
+pass "gateway $(awk '/Version:/ {print $2}' <<<"${status}") is Connected through 127.0.0.1:${PORT}"
 
 step "3. Install the controller in ${CONTROLLER_NAMESPACE}, bound to ${NAMESPACE}"
 run env IMAGE_TAG=demo bash "${ROOT}/tasks/scripts/build-k8s-controller-image.sh" >"${STATE}/image-build.log" 2>&1 \
@@ -148,12 +153,14 @@ run helm install "${RELEASE}" "${ROOT}/deploy/helm/openshell-k8s-controller" \
   --set gateway.url=https://openshell.openshell.svc:8080 \
   --set gateway.workspace="${NAMESPACE}" \
   --set gateway.tls.secretName=gateway-tls
+# Read whole outputs before matching: with pipefail, grep -q can fail a
+# pipeline by closing it early.
+leader() { [[ "$(kubectl -n "${CONTROLLER_NAMESPACE}" logs "deployment/${DEPLOYMENT}" 2>/dev/null)" == *"acquired Lease"* ]]; }
 for _ in $(seq 1 30); do
-  kubectl -n "${CONTROLLER_NAMESPACE}" logs "deployment/${DEPLOYMENT}" 2>/dev/null | grep -q "acquired Lease" && break
+  leader && break
   sleep 1
 done
-kubectl -n "${CONTROLLER_NAMESPACE}" logs "deployment/${DEPLOYMENT}" | grep -q "acquired Lease" \
-  || fail "the controller didn't take its Lease"
+leader || fail "the controller didn't take its Lease"
 pass "controller is running in ${CONTROLLER_NAMESPACE} and watches ${NAMESPACE}"
 
 step "4. Declare a provider, a template, and a sandbox"
@@ -227,11 +234,11 @@ step "6. Delete namespace ${NAMESPACE}"
 started=$(date +%s)
 run kubectl delete namespace "${NAMESPACE}" --timeout=300s
 echo "namespace deleted in $(( $(date +%s) - started )) seconds"
-os sandbox list --workspace "${NAMESPACE}" 2>&1 | grep -q "No sandboxes found" \
+[[ "$(os sandbox list --workspace "${NAMESPACE}" 2>&1)" == *"No sandboxes found"* ]] \
   || fail "the gateway sandbox is still there"
-os sandbox template list --workspace "${NAMESPACE}" 2>&1 | grep -q "No sandbox templates found" \
+[[ "$(os sandbox template list --workspace "${NAMESPACE}" 2>&1)" == *"No sandbox templates found"* ]] \
   || fail "the gateway template revisions are still there"
-os provider list --workspace "${NAMESPACE}" 2>&1 | grep -q "No providers found" \
+[[ "$(os provider list --workspace "${NAMESPACE}" 2>&1)" == *"No providers found"* ]] \
   || fail "the gateway provider is still there"
 pass "the finalizers removed the gateway sandbox, template, and provider, and the namespace is gone"
 

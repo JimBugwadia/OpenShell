@@ -2,17 +2,23 @@
 
 This walkthrough shows the experimental `OpenShellSandboxTemplate` and
 `OpenShellSandbox` controller and the gateway's workspace managers setting. It
-takes about 15 minutes. Part 1 installs the controller in a kind cluster with
-its Helm chart and connects it to an existing local gateway; Part 2 runs a
-gateway built from this checkout to show which identities can change
-sandboxes.
+takes about 15 minutes, plus 20 for Part 3.
+
+- Part 1 installs the controller in a kind cluster with its Helm chart and
+  connects it to an existing local gateway.
+- Part 2 runs a gateway built from this checkout to show which identities can
+  change sandboxes.
+- Part 3 installs everything in one kind cluster: Cilium, Agent Sandbox, the
+  gateway, and the controller. Start here to learn what a Kubernetes install
+  needs.
 
 Each part also has a script that runs the same steps, checks every result, and
 cleans up. Add `DEMO_PAUSE=1` to pause between steps when you present.
 
 ```shell
-DEMO_PAUSE=1 tasks/scripts/demo-k8s-controller.sh          # Part 1
+DEMO_PAUSE=1 tasks/scripts/demo-k8s-controller.sh             # Part 1
 DEMO_PAUSE=1 tasks/scripts/test-workspace-managers-gateway.sh # Part 2
+DEMO_PAUSE=1 tasks/scripts/demo-k8s-controller-in-cluster.sh  # Part 3
 ```
 
 ## Before you start
@@ -64,25 +70,29 @@ kind load docker-image openshell/k8s-controller:demo --name openshell-crd-demo
 
 The controller authenticates to the gateway with a client certificate. This
 demo reuses your CLI's certificate; in production, issue the controller its
-own and list it as the workspace manager, as Part 2 shows. Store the
-certificate in a Secret:
+own and list it as the workspace manager, as Part 2 shows. The controller runs
+in its own namespace, `openshell-system`, not in the namespace it watches: if it
+ran in `agents`, deleting that namespace would delete the controller before it
+could clean up the gateway sandboxes. Store the certificate in a Secret there:
 
 ```shell
-kubectl create secret generic gateway-tls -n agents \
+kubectl create namespace openshell-system
+kubectl create secret generic gateway-tls -n openshell-system \
   --from-file=ca.crt="$MTLS/ca.crt" \
   --from-file=tls.crt="$MTLS/tls.crt" \
   --from-file=tls.key="$MTLS/tls.key"
 ```
 
-Install the chart. One release binds one namespace to one gateway workspace.
-The demo gives both the same name, `agents`, but the controller never derives
-one from the other: the administrator who installs the release sets the
-binding with `gateway.workspace`, so creating a namespace can't select a
-gateway workspace.
+Install the chart. One release binds one namespace, `watchNamespace`, to one
+gateway workspace. The demo gives both the same name, `agents`, but the
+controller never derives one from the other: the administrator who installs
+the release sets the binding with `gateway.workspace`, so creating a namespace
+can't select a gateway workspace.
 
 ```shell
 helm install openshell-controller deploy/helm/openshell-k8s-controller \
-  --namespace agents --wait \
+  --namespace openshell-system --wait \
+  --set watchNamespace=agents \
   --set image.repository=openshell/k8s-controller \
   --set image.tag=demo \
   --set image.pullPolicy=Never \
@@ -90,7 +100,7 @@ helm install openshell-controller deploy/helm/openshell-k8s-controller \
   --set gateway.workspace=agents \
   --set gateway.tls.secretName=gateway-tls
 kubectl get crd | grep openshell.ai
-kubectl logs -n agents deployment/openshell-controller-openshell-k8s-controller
+kubectl logs -n openshell-system deployment/openshell-controller-openshell-k8s-controller
 ```
 
 The chart installs the three CRDs, and the log shows that the controller took
@@ -237,8 +247,8 @@ latest revision; running sandboxes keep the one they started with.
 Replace the controller pod, then check the sandbox:
 
 ```shell
-kubectl rollout restart deployment/openshell-controller-openshell-k8s-controller -n agents
-kubectl rollout status deployment/openshell-controller-openshell-k8s-controller -n agents
+kubectl rollout restart deployment/openshell-controller-openshell-k8s-controller -n openshell-system
+kubectl rollout status deployment/openshell-controller-openshell-k8s-controller -n openshell-system
 kubectl get ossbx support-agent -n agents \
   -o jsonpath='{.status.sandboxId} attempts={.status.journal.createAttempts}{"\n"}'
 ```
@@ -339,6 +349,216 @@ conversation with the existing sandbox API), `openshell-cli` (an ordinary user),
 
 The script uses a temporary directory for everything, including the CLI's
 configuration, so it doesn't change your registered gateways.
+
+## Part 3: run everything in one cluster
+
+Parts 1 and 2 run sandboxes on a gateway outside Kubernetes. This part installs
+the whole stack in one kind cluster, the way you would on a real cluster: a
+network plugin that enforces NetworkPolicy, the Agent Sandbox controller, the
+OpenShell gateway, and the controller. Sandboxes then run as pods in the same
+cluster. It takes about 20 minutes, and you need Docker, kind, kubectl, Helm,
+and the [Cilium CLI](https://docs.cilium.io/en/stable/gettingstarted/k8s-install-default/#install-the-cilium-cli).
+
+The script runs the same steps, checks each result, and deletes the cluster.
+Its CLI configuration lives in a temporary directory, so it doesn't change your
+registered gateways:
+
+```shell
+DEMO_PAUSE=1 tasks/scripts/demo-k8s-controller-in-cluster.sh
+```
+
+### Step 1: create a cluster that enforces NetworkPolicy
+
+The gateway isolates each sandbox with NetworkPolicy: the workload pod may talk
+only to its supervisor pod, which applies the sandbox's network policy. kind's
+default network plugin accepts NetworkPolicy objects but doesn't enforce them,
+so replace it with Cilium:
+
+```shell
+export KUBECONFIG=$PWD/target/openshell-e2e.kubeconfig
+
+cat <<EOF > target/openshell-e2e-kind.yaml
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true
+EOF
+kind create cluster --name openshell-e2e --config target/openshell-e2e-kind.yaml \
+  --kubeconfig "$KUBECONFIG"
+cilium install --version 1.18.1 --wait
+cilium status --wait
+```
+
+Until Cilium is running, the node reports `NotReady`; that's expected.
+
+### Step 2: install Agent Sandbox
+
+The gateway creates each sandbox's workload pod through the
+[Agent Sandbox](https://agent-sandbox.sigs.k8s.io) controller, so install it
+first:
+
+```shell
+kubectl apply -f https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v1.0.12/sandbox.yaml
+kubectl -n agent-sandbox-system rollout status deployment
+```
+
+### Step 3: install the gateway
+
+Install the gateway chart. The `0.0.0-dev` version is the latest build of the
+main branch; use a release version when one includes the features you need.
+
+```shell
+helm install openshell oci://quay.io/ai-openshell/charts/openshell \
+  --version 0.0.0-dev --namespace openshell --create-namespace --wait
+kubectl -n openshell get pods
+```
+
+The chart generates a certificate authority, a server certificate, and a client
+certificate with `CN=openshell-client`, stored in Secret `openshell-client-tls`.
+The gateway accepts that client certificate as a user. For other ways to
+authenticate users, see [Authentication options](#authentication-options).
+
+### Step 4: connect the CLI
+
+The gateway has no external address, so reach it through a port-forward. Run
+this in a second terminal and leave it running:
+
+```shell
+export KUBECONFIG=$PWD/target/openshell-e2e.kubeconfig
+kubectl -n openshell port-forward svc/openshell 18080:8080
+```
+
+Back in the first terminal, copy the client certificate to the CLI's
+configuration and register the gateway as `kind`:
+
+```shell
+MTLS=~/.config/openshell/gateways/kind/mtls
+mkdir -p "$MTLS"
+for f in ca.crt tls.crt tls.key; do
+  kubectl -n openshell get secret openshell-client-tls \
+    -o "jsonpath={.data.${f//./\\.}}" | base64 -d > "$MTLS/$f"
+done
+OPENSHELL_LOCAL_TLS_DIR=/nonexistent \
+  openshell gateway add https://127.0.0.1:18080 --local --name kind
+openshell -g kind status
+openshell -g kind workspace create --name agents
+```
+
+With `--local`, the CLI also imports the client certificate of any gateway
+installed on your machine, such as one from Homebrew, over the files you just
+copied. `OPENSHELL_LOCAL_TLS_DIR=/nonexistent` turns that import off. Without
+it, `status` fails with `invalid peer certificate: BadSignature`.
+
+`openshell -g kind status` shows `Status: Connected` and
+`Authentication: Authenticated (mTLS transport)`. Adding a gateway makes it the
+active one; to switch back, run `openshell gateway select openshell`.
+
+### Step 5: install the controller
+
+Run the controller in its own namespace, not in the namespace it watches. If it
+ran in `agents`, deleting that namespace would delete the controller before it
+could clean up the gateway sandboxes.
+
+```shell
+IMAGE_TAG=demo tasks/scripts/build-k8s-controller-image.sh
+kind load docker-image openshell/k8s-controller:demo --name openshell-e2e
+
+kubectl create namespace agents
+kubectl create namespace openshell-system
+kubectl -n openshell-system create secret generic gateway-tls \
+  --from-file="$MTLS/ca.crt" --from-file="$MTLS/tls.crt" --from-file="$MTLS/tls.key"
+
+helm install openshell-controller deploy/helm/openshell-k8s-controller \
+  --namespace openshell-system --wait \
+  --set watchNamespace=agents \
+  --set image.repository=openshell/k8s-controller \
+  --set image.tag=demo \
+  --set image.pullPolicy=Never \
+  --set gateway.url=https://openshell.openshell.svc:8080 \
+  --set gateway.workspace=agents \
+  --set gateway.tls.secretName=gateway-tls
+kubectl -n openshell-system logs deployment/openshell-controller-openshell-k8s-controller
+```
+
+The controller reaches the gateway through its in-cluster Service,
+`openshell.openshell.svc`, which the gateway's server certificate includes. The
+log shows that the controller took its leader Lease.
+
+### Step 6: declare a sandbox
+
+Follow [Step 2 of Part 1](#step-2-declare-a-provider-a-template-and-a-sandbox),
+adding `-g kind` to each `openshell` command. Then look at the pods the gateway
+created for the sandbox:
+
+```shell
+kubectl -n openshell get pods
+```
+
+Expected: besides `openshell-0`, a supervisor pod (`os-supervisor-...`) and a
+workload pod (`agents--os-...`). The workload pod runs the template's image; the
+supervisor pod holds the credentials and enforces the sandbox's policy. Steps 3
+to 7 of Part 1 work here too, with `-g kind`. For Step 8, the etcd pod is
+`etcd-openshell-e2e-control-plane`.
+
+### Step 7: check that NetworkPolicy is enforced
+
+Run the same connection check in the workload pod's network and in an ordinary
+pod. An ephemeral container shares the workload pod's network, and so its
+NetworkPolicy:
+
+```shell
+kubectl -n openshell get networkpolicy
+WORKLOAD=$(kubectl -n openshell get pod -l openshell.ai/boundary-role=workload \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl -n openshell debug "$WORKLOAD" -it --image=busybox:1.36 --profile=general \
+  -- sh -c 'nc -w 5 -z 1.1.1.1 443 && echo CONNECTED || echo BLOCKED'
+kubectl run netcheck -it --rm --restart=Never --image=busybox:1.36 \
+  -- sh -c 'nc -w 5 -z 1.1.1.1 443 && echo CONNECTED || echo BLOCKED'
+```
+
+Expected: `BLOCKED` from the workload pod and `CONNECTED` from the ordinary
+pod. The workload's traffic can leave only through its supervisor, which
+applies the sandbox's network policy. With kind's default network plugin, both
+would print `CONNECTED`.
+
+### Step 8: delete the namespace
+
+Deleting a namespace deletes every resource in it. The controller's finalizers
+hold each one until the gateway object is gone:
+
+```shell
+kubectl delete namespace agents
+openshell -g kind sandbox list --workspace agents
+openshell -g kind sandbox template list --workspace agents
+openshell -g kind provider list --workspace agents
+```
+
+Expected: the namespace takes about a minute to delete, and all three lists are
+empty. The gateway refuses to delete a provider while a sandbox uses it, so the
+provider waits for the sandbox and retries. The gateway workspace stays; delete
+it yourself if you don't need it.
+
+### Clean up
+
+Stop the port-forward, then:
+
+```shell
+openshell gateway remove kind
+kind delete cluster --name openshell-e2e --kubeconfig "$KUBECONFIG"
+```
+
+### Authentication options
+
+The chart's client certificate is enough for a throwaway cluster, but everyone
+who has it is the same user, and the controller in this part reuses it. For a
+shared cluster, pick one of the gateway's other user authentication models,
+described in [Access Control](https://docs.nvidia.com/openshell/latest/kubernetes/access-control):
+
+| Option | How it works | What it means for the controller |
+| :- | :- | :- |
+| Client certificates (this part) | The gateway maps each verified client certificate to a user. | Issue the controller its own certificate, so the gateway can tell it from people and, with workspace managers, allow only it to change sandboxes. The chart's certificate authority key isn't kept, so issue certificates from your own CA, as Part 2 does. |
+| OIDC | The gateway validates a bearer token from an identity provider, such as Keycloak, Microsoft Entra ID, or Okta, and maps its roles to OpenShell roles. Set `gatewayConfig.openshell.gateway.oidc.issuer` and `audience` on the gateway chart. | The controller reads a bearer token from a file (`gateway.token.secretName` on its chart) and reloads it when it changes, but it can't request tokens itself. Something else must refresh the Secret before the token expires, such as a job that runs the client credentials flow. Built-in client credentials support is a follow-up. |
+| A trusted access proxy | A proxy such as Cloudflare Access, ngrok, or a corporate SSO gateway authenticates callers, and the gateway accepts every call it forwards (`server.disableTls=true` and `allow_unauthenticated_users=true`). | Point the controller at the gateway's in-cluster Service, which bypasses the proxy. The gateway then can't tell the controller from anyone else, so workspace managers can't protect the controller's sandboxes. Use this only when the gateway is unreachable except through the proxy. |
 
 ## Troubleshooting
 
